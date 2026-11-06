@@ -525,7 +525,7 @@ export function parseImport(text, byteLength = text ? text.length : 0) {
     trips = data.trips;
   } else if ('tripId' in data || 'stops' in data) {
     kind = 'trip';
-    trips = [data];
+    trips = [normalizeIncomingTrip(data)];
   } else {
     return fail(['無法辨識的檔案格式（不是本 App 的備份或行程檔）']);
   }
@@ -553,6 +553,46 @@ export function parseImport(text, byteLength = text ? text.length : 0) {
   // 回傳深拷貝並補齊選填設定的預設值
   const clean = trips.map((t) => fillDefaults(JSON.parse(JSON.stringify(t))));
   return { ok: true, kind, trips: clean, errors: [], summary, exportedAt: data.exportedAt || null };
+}
+
+/**
+ * 單一旅程檔（含 AI 產生的檔案）：只補上「缺少的」系統欄位（id、狀態、時間戳等），
+ * 不修改任何已存在的值、不補任何旅遊資料；已存在但錯誤的值仍交由 validateTrip 回報。
+ * 完整備份不經過這一步（必須完全符合格式）。
+ */
+export function normalizeIncomingTrip(data) {
+  if (typeOf(data) !== 'object') return data;
+  const missing = (v) => v === undefined || v === null;
+  const t = { ...data };
+  if (missing(t.schemaVersion)) t.schemaVersion = SCHEMA_VERSION;
+  if (missing(t.tripId) || t.tripId === '') t.tripId = uuid();
+  if (missing(t.settings)) t.settings = {};
+  if (typeOf(t.settings) === 'object') {
+    t.settings = { ...t.settings };
+    if (missing(t.settings.defaultMode)) t.settings.defaultMode = 'walking';
+  }
+  if (Array.isArray(t.stops)) {
+    const counters = new Map();
+    const ts = nowIso();
+    t.stops = t.stops.map((s) => {
+      if (typeOf(s) !== 'object') return s;
+      const x = { ...s };
+      if (x.date === undefined || x.date === '') x.date = null;
+      if (missing(x.id) || x.id === '') x.id = uuid();
+      const n = (counters.get(x.date) || 0) + 1;
+      counters.set(x.date, n);
+      if (missing(x.order)) x.order = n;
+      if (missing(x.city)) x.city = '';
+      if (missing(x.type)) x.type = 'attraction';
+      if (missing(x.defaultMode)) x.defaultMode = (typeOf(t.settings) === 'object' && MODES.includes(t.settings.defaultMode)) ? t.settings.defaultMode : 'walking';
+      if (missing(x.status)) x.status = 'pending';
+      if (missing(x.destinationConfirmed)) x.destinationConfirmed = false;
+      for (const k of ['startTime', 'endTime', 'referenceUrl', 'address', 'localName', 'notes']) if (x[k] === '') x[k] = null;
+      if (missing(x.updatedAt)) x.updatedAt = ts;
+      return x;
+    });
+  }
+  return t;
 }
 
 /** 補齊選填欄位（不改動任何已存在的值）。 */

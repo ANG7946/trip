@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "title": "我的旅程",
+  "timeZone": "Europe/Vienna",
+  "startDate": "2026-11-12",
+  "endDate": "2026-11-14",
+  "settings": {
+    "defaultMode": "walking"
+  },
+  "stops": [
+    {
+      "date": "2026-11-12",
+      "order": 1,
+      "city": "Vienna",
+      "title": "卡爾教堂",
+      "localName": "Karlskirche",
+      "type": "attraction",
+      "startTime": "10:00",
+      "endTime": null,
+      "address": null,
+      "coordinates": null,
+      "entranceCoordinates": null,
+      "destinationConfirmed": false,
+      "defaultMode": "walking",
+      "notes": null,
+      "referenceUrl": null
+    },
+    {
+      "date": "2026-11-13",
+      "order": 1,
+      "city": "Budapest",
+      "title": "漁人堡",
+      "localName": "Halászbástya",
+      "type": "attraction",
+      "startTime": null,
+      "endTime": null,
+      "address": null,
+      "coordinates": null,
+      "entranceCoordinates": null,
+      "destinationConfirmed": false,
+      "defaultMode": "walking",
+      "notes": null,
+      "referenceUrl": null
+    },
+    {
+      "date": null,
+      "order": 1,
+      "city": "Vienna",
+      "title": "聖史蒂芬大教堂",
+      "localName": "Stephansdom",
+      "type": "attraction",
+      "startTime": null,
+      "endTime": null,
+      "address": null,
+      "coordinates": null,
+      "entranceCoordinates": null,
+      "destinationConfirmed": false,
+      "defaultMode": "walking",
+      "notes": "日期為 null = 候選景點",
+      "referenceUrl": null
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+請把我下面提供的旅行行程，轉換成「旅程導航助手」可以匯入的 JSON 檔。
+
+【輸出規則】
+1. 只輸出一個 JSON 物件，不要任何說明文字，也不要 Markdown 程式碼框。
+2. 不要自行猜測或補上我沒有提供的地址、座標、時間或交通班次；不確定的欄位一律填 null。
+3. 地名的 title 用中文（若我給的是中文），localName 填當地語言原名（例如 Karlskirche、Halászbástya）。
+4. 日期格式 YYYY-MM-DD，時間格式 HH:mm（24 小時制），皆為旅行當地時間。
+5. 還沒決定日期的地點，date 填 null（會成為「候選景點」）。
+6. 同一天的停靠點依我給的先後順序，order 從 1 開始編號。
+7. 座標格式 {"lat": 緯度, "lng": 經度}；只有在我提供時才填。
+8. 不要放入訂位代碼、護照號碼、付款資訊或任何密碼。
+
+【JSON 結構】
+{
+  "schemaVersion": 1,
+  "title": "旅程名稱",
+  "timeZone": "旅行地的 IANA 時區，例如 Europe/Vienna、Asia/Tokyo",
+  "startDate": "YYYY-MM-DD",
+  "endDate": "YYYY-MM-DD",
+  "settings": { "defaultMode": "walking" },
+  "stops": [
+    {
+      "date": "YYYY-MM-DD 或 null",
+      "order": 1,
+      "city": "城市（英文或當地拼法）",
+      "title": "名稱",
+      "localName": "當地語言原名或 null",
+      "type": "attraction | hotel | conference | station | transfer | meal | other 之一",
+      "startTime": "HH:mm 或 null",
+      "endTime": "HH:mm 或 null",
+      "address": "完整地址或 null",
+      "coordinates": null,
+      "entranceCoordinates": null,
+      "destinationConfirmed": false,
+      "defaultMode": "walking | transit | driving | cycling 之一",
+      "notes": "備註或 null",
+      "referenceUrl": "https:// 開頭的網址或 null"
+    }
+  ]
+}
+
+【我的行程】
+（請把行程貼在這裡：文字、表格、訂位確認信內容皆可）

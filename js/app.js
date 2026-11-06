@@ -1,8 +1,9 @@
 // app.js — 介面與互動
 import * as C from './core.js';
 import * as DB from './db.js';
+import * as V from './csv.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -173,7 +174,7 @@ function render() {
   renderTabBar();
 
   let view;
-  if (!trip && !['tripform', 'trips', 'import', 'settings', 'maptest'].includes(state.route.name)) {
+  if (!trip && !['tripform', 'trips', 'import', 'settings', 'maptest', 'guide', 'paste'].includes(state.route.name)) {
     view = viewWelcome();
   } else {
     switch (state.route.name) {
@@ -186,6 +187,8 @@ function render() {
       case 'trips': view = viewTrips(); break;
       case 'import': view = viewImport(); break;
       case 'maptest': view = viewMapTest(trip); break;
+      case 'guide': view = viewGuide(); break;
+      case 'paste': view = viewPaste(); break;
       default: view = viewToday(trip);
     }
   }
@@ -220,7 +223,7 @@ function renderTabBar() {
   const nav = document.getElementById('tabbar');
   nav.replaceChildren(...tabs.map(([name, label, href]) => {
     const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
-      || (name === 'settings' && ['tripform', 'trips', 'import', 'maptest'].includes(r));
+      || (name === 'settings' && ['tripform', 'trips', 'import', 'maptest', 'guide', 'paste'].includes(r));
     return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
   }));
 }
@@ -722,7 +725,7 @@ function viewStopForm(trip, stopId, newDateArg) {
 // ---------- 設定／備份 ----------
 function viewSettings(trip) {
   const fileInput = h('input', {
-    type: 'file', accept: '.json,application/json', class: 'visually-hidden', id: 'import-file',
+    type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'import-file',
     on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) },
   });
 
@@ -760,8 +763,17 @@ function viewSettings(trip) {
     h('div', { class: 'btn-row' },
       btn('匯出完整備份', () => exportBackup(), 'btn primary', { disabled: !state.trips.length }),
       trip ? btn('匯出分享範本（不含完成紀錄與備註）', () => exportTemplate(trip), 'btn ghost') : null,
-      h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入備份或行程檔…'),
+      h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
+      h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容'),
       fileInput)));
+
+  sections.push(h('section', { class: 'card' },
+    h('h2', { text: '建立行程檔（自己用或分享給朋友）' }),
+    h('p', { class: 'hint', text: '除了在 App 內逐筆新增，也可以用試算表填寫 CSV 範本，或請 AI 依提示詞把行程轉成 JSON，再匯入。' }),
+    h('div', { class: 'btn-row' },
+      h('a', { class: 'btn', href: '#guide' }, '查看說明與 AI 提示詞'),
+      h('a', { class: 'btn ghost', href: './data/trip-template.csv', download: 'trip-template.csv' }, '下載 CSV 範本'),
+      h('a', { class: 'btn ghost', href: './data/trip-template.json', download: 'trip-template.json' }, '下載 JSON 範本'))));
 
   sections.push(h('section', { class: 'card' },
     h('h2', { text: '離線與儲存狀態' }),
@@ -846,9 +858,13 @@ async function handleImportFile(file, inputEl) {
       toast('檔案過大，無法匯入。', { kind: 'error' });
       return;
     }
-    const text = await file.text();
-    const result = C.parseImport(text, file.size);
-    state.pendingImport = { ...result, fileName: file.name };
+    // 依內容判斷格式（iOS「檔案」有時不保留副檔名）：以 { 開頭視為 JSON，其餘視為 CSV／表格
+    const { text, encoding } = V.decodeCsvBytes(await file.arrayBuffer());
+    if (text.trim().startsWith('{')) {
+      state.pendingImport = { ...C.parseImport(text, file.size), fileName: file.name };
+    } else {
+      state.pendingImport = { ...V.csvToDrafts(text), kind: 'csv', encoding, fileName: file.name };
+    }
     go('#import');
   } catch (e) {
     toast(`讀取檔案失敗：${e.message || e}`, { kind: 'error' });
@@ -863,6 +879,7 @@ function viewImport() {
     return h('div', { class: 'view' }, h('p', { text: '沒有待匯入的檔案。' }), h('a', { class: 'btn', href: '#settings' }, '回到設定'));
   }
   const cancel = () => { state.pendingImport = null; go('#settings'); };
+  if (pi.kind === 'csv') return viewImportCsv(pi, cancel);
   if (!pi.ok) {
     return h('div', { class: 'view import-view' },
       h('header', { class: 'page-header' }, h('h1', { text: '無法匯入' })),
@@ -920,6 +937,188 @@ function viewImport() {
     h('div', { class: 'form-actions' },
       btn(isBackup ? '確認整份取代' : (willReplaceSame ? '確認取代此旅程' : '加入為新旅程'), confirmImport, 'btn primary'),
       btn('取消', cancel, 'btn ghost')));
+}
+
+// ---------- CSV 匯入預覽 ----------
+function viewImportCsv(pi, cancel) {
+  if (!pi.ok) {
+    return h('div', { class: 'view import-view' },
+      h('header', { class: 'page-header' }, h('h1', { text: '無法匯入 CSV' })),
+      h('p', { text: `檔案「${pi.fileName}」有以下問題，目前的資料完全沒有被更動。請在試算表修正後重新匯出 CSV。` }),
+      h('div', { class: 'form-errors' }, pi.errors.slice(0, 20).map((e) => h('p', { text: e })),
+        pi.errors.length > 20 ? h('p', { text: `……另有 ${pi.errors.length - 20} 項錯誤` }) : null),
+      h('div', { class: 'btn-row' }, btn('返回', cancel, 'btn'), h('a', { class: 'btn ghost', href: '#guide' }, '查看欄位說明')));
+  }
+  const trip = activeTrip();
+  const dated = pi.rows.filter((r) => r.date);
+  const errorBox = h('div', { class: 'form-errors', role: 'alert' });
+  const showErrors = (errs) => {
+    errorBox.replaceChildren(...errs.slice(0, 12).map((e) => h('p', { text: e })));
+    if (errs.length) errorBox.scrollIntoView({ block: 'center' });
+  };
+
+  const defaultTz = trip ? trip.timeZone : 'Europe/Vienna';
+  const inp = {
+    title: h('input', { type: 'text', value: pi.fileName.replace(/\.[^.]+$/, '') }),
+    start: h('input', { type: 'date', value: pi.dateRange ? pi.dateRange.min : '' }),
+    end: h('input', { type: 'date', value: pi.dateRange ? pi.dateRange.max : '' }),
+    tz: h('select', null, (C.COMMON_TIME_ZONES.includes(defaultTz) ? C.COMMON_TIME_ZONES : [defaultTz, ...C.COMMON_TIME_ZONES])
+      .map((z) => h('option', { value: z, selected: z === defaultTz }, z))),
+  };
+
+  async function asNewTrip() {
+    const errs = [];
+    const title = inp.title.value.trim();
+    if (!title) errs.push('請填寫旅程名稱。');
+    if (!C.isValidDateString(inp.start.value) || !C.isValidDateString(inp.end.value)) errs.push('請填寫起訖日期。');
+    else if (inp.start.value > inp.end.value) errs.push('起始日不可晚於結束日。');
+    if (errs.length) return showErrors(errs);
+    const t = C.createTrip({ title, timeZone: inp.tz.value, startDate: inp.start.value, endDate: inp.end.value });
+    const res = V.appendDrafts(t, pi.rows);
+    if (!res.ok) return showErrors(res.errors);
+    const nt = { ...t, stops: res.stops };
+    const v = C.validateTrip(nt);
+    if (v.length) return showErrors(v);
+    const ok = await commitTrip(nt, { rerender: false });
+    if (!ok) return;
+    state.pendingImport = null;
+    await switchTrip(nt.tripId);
+    toast(`已建立旅程並匯入 ${res.addedCount} 筆`, { duration: 3500 });
+    go('#today');
+  }
+
+  async function intoCurrent() {
+    const res = V.appendDrafts(trip, pi.rows);
+    if (!res.ok) return showErrors(res.errors);
+    const nt = { ...trip, stops: res.stops };
+    const v = C.validateTrip(nt);
+    if (v.length) return showErrors(v);
+    const ok = await commitTrip(nt, { rerender: false });
+    if (!ok) return;
+    state.pendingImport = null;
+    toast(`已加入 ${res.addedCount} 筆到「${trip.title}」`, { duration: 3500 });
+    go('#edit');
+  }
+
+  return h('div', { class: 'view import-view' },
+    h('header', { class: 'page-header' }, h('h1', { text: '確認匯入 CSV' })),
+    h('p', { class: 'sub', text: `檔案：${pi.fileName}・編碼：${pi.encoding}` }),
+    h('p', { text: `共 ${pi.rows.length} 筆：已排日期 ${dated.length} 筆、候選景點 ${pi.rows.length - dated.length} 筆${pi.dateRange ? `；日期 ${pi.dateRange.min}～${pi.dateRange.max}` : ''}。` }),
+    pi.warnings.length ? h('div', { class: 'warn-box' }, pi.warnings.map((w) => h('p', { text: w }))) : null,
+    h('ol', { class: 'plain-list preview-list' }, pi.rows.slice(0, 30).map((r) => h('li', {
+      text: `${r.date ? C.formatDateShort(r.date) : '候選'}・${r.title}${r.city ? `（${r.city}）` : ''}${r.address || r.coordinates ? '' : '・無地址'}`,
+    }))),
+    pi.rows.length > 30 ? h('p', { class: 'hint', text: `……另有 ${pi.rows.length - 30} 筆` }) : null,
+    errorBox,
+    h('section', { class: 'card' },
+      h('h2', { text: '建立為新旅程' }),
+      field('旅程名稱', inp.title),
+      h('div', { class: 'two-col' }, field('起始日', inp.start), field('結束日', inp.end)),
+      field('旅行地時區', inp.tz),
+      btn('建立新旅程並匯入', asNewTrip, 'btn primary')),
+    trip ? h('section', { class: 'card' },
+      h('h2', { text: '或加入目前旅程' }),
+      h('p', { class: 'hint', text: `「${trip.title}」（${trip.startDate}～${trip.endDate}）。新資料會接在各日既有停靠點之後，不會覆蓋任何資料。` }),
+      btn(`加入「${trip.title}」`, intoCurrent, 'btn')) : null,
+    h('div', { class: 'form-actions' }, btn('取消', cancel, 'btn ghost')));
+}
+
+// ---------- 貼上行程內容 ----------
+function viewPaste() {
+  const ta = h('textarea', { rows: '10', class: 'paste-box', placeholder: '貼上 AI 產生的 JSON，或從試算表複製的表格（含第一列欄名）', 'aria-label': '行程內容', spellcheck: 'false', autocapitalize: 'off' });
+  const errorBox = h('div', { class: 'form-errors', role: 'alert' });
+  function check() {
+    let text = ta.value.trim();
+    if (!text) {
+      errorBox.replaceChildren(h('p', { text: '請先貼上內容。' }));
+      return;
+    }
+    // 去掉 AI 常附帶的 ``` 程式碼框
+    text = text.replace(/^```(?:json|csv)?\s*/i, '').replace(/```\s*$/, '').trim();
+    if (text.startsWith('{')) {
+      state.pendingImport = { ...C.parseImport(text), fileName: '貼上的內容' };
+    } else {
+      state.pendingImport = { ...V.csvToDrafts(text), kind: 'csv', encoding: '文字', fileName: '貼上的表格' };
+    }
+    go('#import');
+  }
+  return h('div', { class: 'view form-view' },
+    h('header', { class: 'page-header' }, h('h1', { text: '貼上行程內容' })),
+    h('p', { class: 'hint', text: '支援兩種內容：AI 依提示詞產生的 JSON，或從 Excel／Numbers／Google 試算表直接複製的表格。下一步會先預覽，確認後才寫入。' }),
+    navigator.clipboard && navigator.clipboard.readText ? btn('從剪貼簿貼上', async () => {
+      try { ta.value = await navigator.clipboard.readText(); } catch { toast('無法讀取剪貼簿，請長按文字框手動貼上', { duration: 4000 }); }
+    }, 'btn ghost') : null,
+    ta,
+    errorBox,
+    h('div', { class: 'form-actions' },
+      btn('檢查並預覽', check, 'btn primary'),
+      h('a', { class: 'btn ghost', href: '#guide' }, '查看說明'),
+      btn('取消', () => (history.length > 1 ? history.back() : go('#settings')), 'btn ghost')));
+}
+
+// ---------- 說明：如何建立行程檔 ----------
+function viewGuide() {
+  const appUrl = `${location.origin}${location.pathname}`;
+  const colRows = [
+    ['日期', '2026-11-12；留空＝候選景點'],
+    ['順序', '同一天的先後（數字，可留空＝依列的順序）'],
+    ['城市', 'Vienna、Budapest…；只有名稱時，導航需要城市'],
+    ['名稱', '必填'],
+    ['當地名稱', '例：Karlskirche；導航會優先用原名搜尋'],
+    ['類型', '景點、住宿、會議、車站、交通、用餐、其他'],
+    ['開始時間／結束時間', '09:30（24 小時制）'],
+    ['地址', '完整地址最可靠'],
+    ['座標／入口座標', '「緯度, 經度」，例：48.1982, 16.3719'],
+    ['交通方式', '步行、大眾運輸、開車、自行車'],
+    ['已確認地點', '填「是」表示已實際確認目的地'],
+    ['參考網址', 'https:// 開頭'],
+    ['備註', '純文字；請勿填訂位代碼或密碼'],
+  ];
+  return h('div', { class: 'view guide-view' },
+    h('header', { class: 'page-header' },
+      h('h1', { text: '如何建立行程' }),
+      h('p', { class: 'sub', text: '三種方式擇一即可；資料都只存在您自己的手機。' })),
+
+    h('section', { class: 'card' },
+      h('h2', { text: '方式一：在 App 內逐筆新增' }),
+      h('p', { text: '「設定／備份 → 切換或新增旅程 → 建立新旅程」，再到「編輯行程」按「新增停靠點」。適合停靠點不多、或臨時增加。' })),
+
+    h('section', { class: 'card' },
+      h('h2', { text: '方式二：用試算表填寫（Excel／Numbers／Google 試算表）' }),
+      h('ol', null,
+        h('li', null, '下載 CSV 範本，用試算表開啟，保留第一列欄名，照範例填寫（範例列可刪除）。'),
+        h('li', null, '另存為 CSV（Excel 請選「CSV UTF-8」；一般 CSV 也可以）。'),
+        h('li', null, '把檔案傳到手機，在 App「設定／備份 → 匯入檔案」選取；也可以直接在試算表選取整個表格複製，到「貼上行程內容」貼上。')),
+      h('a', { class: 'btn', href: './data/trip-template.csv', download: 'trip-template.csv' }, '下載 CSV 範本'),
+      h('table', { class: 'col-table' },
+        h('thead', null, h('tr', null, h('th', { text: '欄位' }), h('th', { text: '填寫方式' }))),
+        h('tbody', null, colRows.map(([a, b]) => h('tr', null, h('td', { text: a }), h('td', { text: b })))))),
+
+    h('section', { class: 'card' },
+      h('h2', { text: '方式三：請 AI 幫忙轉換（ChatGPT／Claude／Gemini）' }),
+      h('ol', null,
+        h('li', null, '複製下方提示詞，貼到 AI 對話中。'),
+        h('li', null, '在提示詞最後的「我的行程」貼上您的行程（文字、表格、訂位信內容皆可；請先刪除訂位代碼與付款資訊）。'),
+        h('li', null, '複製 AI 回覆的 JSON，到本 App「貼上行程內容」貼上並預覽，確認後匯入。')),
+      h('p', { class: 'hint', text: 'AI 可能出錯：匯入前的檢查會擋下格式錯誤；地址與座標請務必自行確認，App 會把未確認的地點標示「定位待確認」。' }),
+      h('div', { class: 'btn-row' },
+        btn('複製提示詞', async () => {
+          try {
+            await navigator.clipboard.writeText(V.AI_PROMPT);
+            toast('已複製提示詞', { duration: 2500 });
+          } catch {
+            toast('無法自動複製，請長按下方文字全選複製', { duration: 4000 });
+          }
+        }, 'btn primary'),
+        h('a', { class: 'btn ghost', href: '#paste' }, '貼上 AI 結果'),
+        h('a', { class: 'btn ghost', href: './data/trip-template.json', download: 'trip-template.json' }, '下載 JSON 範本')),
+      h('pre', { class: 'prompt-box', text: V.AI_PROMPT })),
+
+    h('section', { class: 'card' },
+      h('h2', { text: '分享給朋友' }),
+      h('p', null, '請朋友用 iPhone Safari 開啟 ', h('strong', { text: appUrl }), '，加入主畫面後依上面任一方式建立行程。每個人的資料只在自己的手機裡，彼此看不到。'),
+      h('p', { class: 'hint', text: '若想把自己規劃好的行程給朋友參考，可到「設定／備份 → 匯出分享範本」，會移除完成紀錄與備註。Android 手機請在設定中把地圖改為 Google 地圖。' })),
+    h('a', { class: 'btn ghost', href: '#settings' }, '返回設定'));
 }
 
 // ---------- 旅程管理 ----------
@@ -1038,8 +1237,10 @@ function viewWelcome() {
       h('p', { class: 'sub', text: '已規劃行程的執行介面：看下一站 → 一按開啟 Apple Maps → 回來手動標記完成。' })),
     h('div', { class: 'btn-col' },
       h('a', { class: 'btn primary big', href: '#tripform/new' }, '建立新旅程'),
-      h('label', { class: 'btn big', for: 'welcome-import', role: 'button', tabindex: '0' }, '匯入備份或行程檔…'),
-      h('input', { type: 'file', accept: '.json,application/json', class: 'visually-hidden', id: 'welcome-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
+      h('label', { class: 'btn big', for: 'welcome-import', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
+      h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容（例如 AI 產生的 JSON）'),
+      h('a', { class: 'btn ghost', href: '#guide' }, '如何建立行程檔？'),
+      h('input', { type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'welcome-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
       btn('先看看示範旅程', loadDemo, 'btn ghost')),
     h('section', { class: 'card' },
       h('h2', { text: '開始之前' }),

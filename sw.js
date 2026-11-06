@@ -1,5 +1,5 @@
 // sw.js — 只快取網站資產（app shell）；行程資料存在 IndexedDB，不經過這裡
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CACHE = `tc-shell-${VERSION}`;
 const ASSETS = [
   './',
@@ -8,12 +8,16 @@ const ASSETS = [
   './js/app.js',
   './js/core.js',
   './js/db.js',
+  './js/csv.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
   './data/demo-trip.json',
+  './data/trip-template.csv',
+  './data/trip-template.json',
+  './data/ai-prompt.txt',
 ];
 
 self.addEventListener('install', (event) => {
