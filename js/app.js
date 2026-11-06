@@ -1,0 +1,1201 @@
+// app.js — 介面與互動
+import * as C from './core.js';
+import * as DB from './db.js';
+
+export const APP_VERSION = '1.0.0';
+
+// ---------- 狀態 ----------
+const state = {
+  trips: [],
+  activeTripId: null,
+  viewDate: null,
+  phase: 'during',
+  todayInTrip: null,
+  lastExportAt: null,
+  onboardingDismissed: false,
+  modeOverride: {},          // 暫時切換的交通方式（stopId → mode），不寫入資料
+  expanded: new Set(),       // 清單中展開的卡片
+  pendingImport: null,       // 匯入預覽
+  swState: 'unknown',        // unknown | ready | unsupported
+  persisted: null,
+  updateReady: null,
+  route: { name: 'today', arg: null },
+};
+
+const main = () => document.getElementById('main');
+const scrollMemory = new Map();
+
+function activeTrip() {
+  return state.trips.find((t) => t.tripId === state.activeTripId) || null;
+}
+
+// ---------- DOM 小工具（所有文字以 textContent 輸出，避免 XSS） ----------
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k === 'style') el.style.cssText = v; // CSSOM，符合 CSP（不使用 style 屬性字串）
+      else if (k === 'on') for (const [ev, fn] of Object.entries(v)) el.addEventListener(ev, fn);
+      else if (k === 'dataset') Object.assign(el.dataset, v);
+      else if (['value', 'checked', 'selected', 'disabled', 'required', 'hidden'].includes(k)) el[k] = v;
+      else el.setAttribute(k, v === true ? '' : String(v));
+    }
+  }
+  appendChildren(el, children);
+  return el;
+}
+
+function appendChildren(el, children) {
+  for (const c of children.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+  }
+}
+
+function btn(label, onClick, cls = 'btn', extra = {}) {
+  return h('button', { type: 'button', class: cls, on: { click: onClick }, ...extra }, label);
+}
+
+function formatLocalTime(iso, tz) {
+  if (!iso) return '';
+  try {
+    return new Intl.DateTimeFormat('zh-TW', {
+      timeZone: tz, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+// ---------- 提示訊息（含復原） ----------
+let toastTimer = null;
+function toast(message, { actionLabel, action, kind = 'info', duration = 6000 } = {}) {
+  const box = document.getElementById('toast');
+  box.replaceChildren();
+  box.className = `toast show ${kind}`;
+  box.appendChild(h('span', { class: 'toast-msg', text: message }));
+  if (actionLabel && action) {
+    box.appendChild(btn(actionLabel, async () => {
+      hideToast();
+      await action();
+    }, 'toast-action'));
+  }
+  box.appendChild(btn('關閉', hideToast, 'toast-close', { 'aria-label': '關閉提示' }));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, kind === 'error' ? 12000 : duration);
+}
+function hideToast() {
+  const box = document.getElementById('toast');
+  box.className = 'toast';
+  box.replaceChildren();
+}
+
+// ---------- 資料寫入（先寫入成功，才更新畫面） ----------
+async function commitTrip(newTrip, { rerender = true } = {}) {
+  const t = { ...newTrip, updatedAt: C.nowIso() };
+  try {
+    await DB.putTrip(t);
+  } catch (e) {
+    toast(`儲存失敗：${e.message || e}。資料未變更，請再試一次。`, { kind: 'error' });
+    return false;
+  }
+  const idx = state.trips.findIndex((x) => x.tripId === t.tripId);
+  if (idx >= 0) state.trips[idx] = t; else state.trips.push(t);
+  if (rerender) render();
+  return true;
+}
+
+async function updateStop(stopId, fn) {
+  const trip = activeTrip();
+  const stop = trip.stops.find((s) => s.id === stopId);
+  if (!stop) return false;
+  const next = fn(stop);
+  return commitTrip({ ...trip, stops: trip.stops.map((s) => (s.id === stopId ? next : s)) });
+}
+
+async function setStatus(stopId, status) {
+  const trip = activeTrip();
+  const before = trip.stops.find((s) => s.id === stopId);
+  if (!before) return;
+  const ok = await updateStop(stopId, (s) => C.applyStatus(s, status));
+  if (!ok) return;
+  const msg = status === 'completed' ? `已完成：${before.title}` : status === 'skipped' ? `已略過：${before.title}` : `已改回待前往：${before.title}`;
+  toast(msg, {
+    actionLabel: '復原',
+    action: async () => {
+      const ok2 = await updateStop(stopId, () => ({ ...before, updatedAt: C.nowIso() }));
+      if (ok2) toast(`已復原：${before.title}`, { duration: 3000 });
+    },
+  });
+}
+
+async function setViewDate(date) {
+  state.viewDate = date;
+  saveSession();
+  render();
+}
+
+// ---------- 工作階段（返回 App 時回到原處） ----------
+function saveSession() {
+  const payload = {
+    tripId: state.activeTripId,
+    viewDate: state.viewDate,
+    hash: location.hash,
+    scrollY: window.scrollY,
+    savedAt: Date.now(),
+  };
+  DB.setMeta('session', payload).catch(() => {});
+}
+
+// ---------- 路由 ----------
+function parseRoute() {
+  const hash = location.hash.replace(/^#\/?/, '');
+  const [name, ...rest] = hash.split('/');
+  return { name: name || 'today', arg: rest.length ? decodeURIComponent(rest.join('/')) : null };
+}
+function go(hash) {
+  if (location.hash === hash) render();
+  else location.hash = hash;
+}
+
+// ---------- 主要渲染 ----------
+function render() {
+  const prevKey = `${state.route.name}/${state.route.arg || ''}`;
+  scrollMemory.set(prevKey, window.scrollY);
+  state.route = parseRoute();
+  const key = `${state.route.name}/${state.route.arg || ''}`;
+
+  const trip = activeTrip();
+  renderStatusBar();
+  renderTabBar();
+
+  let view;
+  if (!trip && !['tripform', 'trips', 'import', 'settings', 'maptest'].includes(state.route.name)) {
+    view = viewWelcome();
+  } else {
+    switch (state.route.name) {
+      case 'dates': view = viewDates(trip); break;
+      case 'edit': view = viewEditDay(trip); break;
+      case 'settings': view = viewSettings(trip); break;
+      case 'stop': view = viewStopForm(trip, state.route.arg, null); break;
+      case 'new': view = viewStopForm(trip, null, state.route.arg); break;
+      case 'tripform': view = viewTripForm(state.route.arg === 'new' ? null : trip); break;
+      case 'trips': view = viewTrips(); break;
+      case 'import': view = viewImport(); break;
+      case 'maptest': view = viewMapTest(trip); break;
+      default: view = viewToday(trip);
+    }
+  }
+  main().replaceChildren(view);
+  const y = key === prevKey ? scrollMemory.get(key) : (scrollMemory.get(key) || 0);
+  window.scrollTo(0, y || 0);
+}
+
+function renderStatusBar() {
+  const bar = document.getElementById('statusbar');
+  bar.replaceChildren();
+  if (!navigator.onLine) {
+    bar.appendChild(h('div', { class: 'banner offline', role: 'status' },
+      h('strong', { text: '離線中' }),
+      '　行程可照常瀏覽與修改；Apple Maps 能否規劃路線取決於網路與您事先下載的離線地圖。'));
+  }
+  if (state.updateReady) {
+    bar.appendChild(h('div', { class: 'banner update', role: 'status' },
+      '有新版本可用。',
+      btn('重新載入', () => state.updateReady(), 'btn small')));
+  }
+}
+
+function renderTabBar() {
+  const r = state.route.name;
+  const tabs = [
+    ['today', '今天', '#today'],
+    ['dates', '全部日期', '#dates'],
+    ['edit', '編輯行程', '#edit'],
+    ['settings', '設定／備份', '#settings'],
+  ];
+  const nav = document.getElementById('tabbar');
+  nav.replaceChildren(...tabs.map(([name, label, href]) => {
+    const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
+      || (name === 'settings' && ['tripform', 'trips', 'import', 'maptest'].includes(r));
+    return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
+  }));
+}
+
+// ---------- 共用：頁首與日期切換 ----------
+function dayHeader(trip, { title } = {}) {
+  const dates = C.listDates(trip.startDate, trip.endDate);
+  const idx = dates.indexOf(state.viewDate);
+  const cities = C.citiesForDate(trip, state.viewDate);
+  const isToday = state.viewDate === state.todayInTrip;
+  const select = h('select', {
+    class: 'date-select', 'aria-label': '選擇日期',
+    on: { change: (e) => setViewDate(e.target.value) },
+  }, dates.map((d) => h('option', { value: d, selected: d === state.viewDate },
+    `${C.formatDateShort(d)}${d === state.todayInTrip ? '・今天' : ''}`)));
+
+  return h('header', { class: 'day-header' },
+    h('div', { class: 'trip-title' }, title || trip.title),
+    h('div', { class: 'date-row' },
+      btn('‹ 前一天', () => setViewDate(dates[idx - 1]), 'btn ghost date-step', { disabled: idx <= 0, 'aria-label': '前一天' }),
+      select,
+      btn('後一天 ›', () => setViewDate(dates[idx + 1]), 'btn ghost date-step', { disabled: idx < 0 || idx >= dates.length - 1, 'aria-label': '後一天' })),
+    h('div', { class: 'date-meta' },
+      h('span', { class: 'date-long', text: C.formatDateLong(state.viewDate) }),
+      isToday ? h('span', { class: 'chip today', text: '今天' }) : null,
+      state.phase === 'before' && !isToday ? h('span', { class: 'chip preview', text: '行前預覽' }) : null,
+      cities.map((c) => h('span', { class: 'chip city', text: c }))));
+}
+
+// ---------- 導航按鈕 ----------
+function mapOpts(trip) {
+  return { provider: trip.settings.mapProvider || 'apple', appleStyle: trip.settings.appleLinkStyle || 'unified' };
+}
+function providerName(trip) {
+  return (trip.settings.mapProvider || 'apple') === 'google' ? 'Google 地圖' : 'Apple Maps';
+}
+
+function navButton(trip, stop, { big = false } = {}) {
+  const mode = state.modeOverride[stop.id] || stop.defaultMode;
+  const url = C.buildDirectionsUrl(stop, mode, mapOpts(trip));
+  const cls = `btn nav${big ? ' big' : ''}`;
+  if (!url) {
+    return h('a', { class: `${cls} disabled`, href: `#stop/${encodeURIComponent(stop.id)}`, 'aria-label': `${stop.title}：補上地址才能導航` },
+      '補上地址或座標才能導航');
+  }
+  // 使用真實的 <a href>：讓 iOS 以使用者點擊直接交給地圖 App，不經過任何非同步等待
+  return h('a', { class: cls, href: url, rel: 'noopener', 'aria-label': `以 ${providerName(trip)} ${C.MODE_LABELS[mode]}導航至 ${stop.title}` },
+    `開啟 ${providerName(trip)} · ${C.MODE_LABELS[mode]}`);
+}
+
+function modeSwitcher(stop) {
+  const current = state.modeOverride[stop.id] || stop.defaultMode;
+  return h('div', { class: 'mode-switch', role: 'group', 'aria-label': '本次交通方式' },
+    C.MODES.map((m) => h('button', {
+      type: 'button',
+      class: `seg${m === current ? ' on' : ''}`,
+      'aria-pressed': m === current ? 'true' : 'false',
+      on: {
+        click: () => {
+          if (m === stop.defaultMode) delete state.modeOverride[stop.id];
+          else state.modeOverride[stop.id] = m;
+          render();
+        },
+      },
+    }, C.MODE_LABELS[m])));
+}
+
+function destinationTag(stop) {
+  const d = C.resolveDestination(stop);
+  if (!d.level) return h('span', { class: 'tag warn', text: '尚未設定可靠導航地點' });
+  if (d.level === 'name') return h('span', { class: 'tag warn', text: '定位待確認（僅名稱搜尋）' });
+  if (!stop.destinationConfirmed) return h('span', { class: 'tag caution', text: `定位待確認・${C.DESTINATION_LEVEL_LABELS[d.level]}` });
+  return h('span', { class: 'tag ok', text: `已確認・${C.DESTINATION_LEVEL_LABELS[d.level]}` });
+}
+
+function statusBadge(stop) {
+  const icon = stop.status === 'completed' ? '✓ ' : stop.status === 'skipped' ? '⤼ ' : '○ ';
+  return h('span', { class: `badge ${stop.status}` }, icon + C.STATUS_LABELS[stop.status]);
+}
+
+function timeText(stop) {
+  if (stop.startTime && stop.endTime) return `${stop.startTime}–${stop.endTime}`;
+  return stop.startTime || '';
+}
+
+function stopNames(stop) {
+  return [
+    h('span', { class: 'stop-title', text: stop.title }),
+    stop.localName && stop.localName !== stop.title ? h('span', { class: 'stop-local', lang: 'und', text: stop.localName }) : null,
+  ];
+}
+
+function fallbackActions(trip, stop) {
+  const placeUrl = C.buildPlaceUrl(stop, { provider: trip.settings.mapProvider || 'apple' });
+  const text = C.copyableLocation(stop);
+  return h('div', { class: 'fallback-row' },
+    btn('複製地址／座標', async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('已複製', { duration: 2500 });
+      } catch {
+        window.prompt('請手動複製：', text);
+      }
+    }, 'btn ghost small'),
+    placeUrl ? h('a', { class: 'btn ghost small', href: placeUrl, rel: 'noopener' }, '在地圖中查看地點') : null,
+    stop.referenceUrl && C.isSafeHttpsUrl(stop.referenceUrl)
+      ? h('a', { class: 'btn ghost small', href: stop.referenceUrl, target: '_blank', rel: 'noopener noreferrer' }, '參考網頁')
+      : null);
+}
+
+function statusButtons(stop) {
+  if (stop.status === 'pending') {
+    return h('div', { class: 'status-row' },
+      btn('✓ 標記已完成', () => setStatus(stop.id, 'completed'), 'btn done'),
+      btn('略過', () => setStatus(stop.id, 'skipped'), 'btn skip'));
+  }
+  return h('div', { class: 'status-row' },
+    btn('改回待前往', () => setStatus(stop.id, 'pending'), 'btn ghost'));
+}
+
+// ---------- 今天（日檢視） ----------
+function viewToday(trip) {
+  const stops = C.stopsForDate(trip, state.viewDate);
+  const p = C.progress(stops);
+  const next = C.nextStop(trip, state.viewDate);
+  const wrap = h('div', { class: 'view today-view' }, dayHeader(trip));
+
+  if (stops.length) {
+    wrap.appendChild(h('section', { class: 'progress', 'aria-label': '本日進度' },
+      h('div', { class: 'progress-nums' },
+        h('span', null, h('strong', { text: `已完成 ${p.completed}` }), ` / 有效行程 ${p.total}`),
+        h('span', { class: 'skipped-num', text: `略過 ${p.skipped}` })),
+      h('div', { class: 'bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(p.total), 'aria-valuenow': String(p.completed) },
+        h('div', { class: 'bar-done', style: `width:${(p.completedRatio * 100).toFixed(1)}%` }),
+        h('div', { class: 'bar-skip', style: `width:${((p.handledRatio - p.completedRatio) * 100).toFixed(1)}%` }))));
+  }
+
+  if (!stops.length) {
+    wrap.appendChild(h('section', { class: 'empty' },
+      h('p', { text: '這一天還沒有任何停靠點。' }),
+      h('a', { class: 'btn primary', href: `#new/${state.viewDate}` }, '＋ 新增停靠點'),
+      C.candidates(trip).length ? h('a', { class: 'btn ghost', href: '#edit' }, `從候選景點排入（${C.candidates(trip).length}）`) : null));
+    appendChildren(wrap, [onboardingCard(trip), backupReminder(trip)]);
+    return wrap;
+  }
+
+  if (next) {
+    wrap.appendChild(nextCard(trip, next));
+  } else {
+    wrap.appendChild(h('section', { class: 'all-done' },
+      h('h2', { text: '本日所有行程已處理' }),
+      h('p', { text: `完成 ${p.completed} 項，略過 ${p.skipped} 項。` }),
+      h('p', { class: 'hint', text: '若當日行程結束，建議到「設定／備份」匯出一次備份。' })));
+  }
+
+  // 提醒放在下一站之後，讓主要導航按鈕維持在畫面上方
+  appendChildren(wrap, [onboardingCard(trip), backupReminder(trip)]);
+
+  const others = stops.filter((s) => !next || s.id !== next.id);
+  if (others.length) {
+    wrap.appendChild(h('h2', { class: 'section-title', text: next ? '本日其他行程' : '本日行程' }));
+    wrap.appendChild(h('ol', { class: 'stop-list' }, others.map((s) => h('li', null, listCard(trip, s, stops.indexOf(s) + 1)))));
+  }
+  wrap.appendChild(h('div', { class: 'add-row' }, h('a', { class: 'btn ghost', href: `#new/${state.viewDate}` }, '＋ 新增停靠點')));
+  return wrap;
+}
+
+function nextCard(trip, stop) {
+  const d = C.resolveDestination(stop);
+  return h('section', { class: 'next-card', 'aria-label': '下一站' },
+    h('div', { class: 'next-label' }, '下一站'),
+    h('h2', { class: 'next-name' }, stopNames(stop)),
+    h('div', { class: 'meta-row' },
+      timeText(stop) ? h('span', { class: 'meta time', text: timeText(stop) }) : null,
+      stop.city ? h('span', { class: 'meta', text: stop.city }) : null,
+      h('span', { class: 'meta', text: C.TYPE_LABELS[stop.type] }),
+      destinationTag(stop)),
+    stop.notes ? h('p', { class: 'notes', text: stop.notes }) : null,
+    navButton(trip, stop, { big: true }),
+    d.level ? modeSwitcher(stop) : h('a', { class: 'btn ghost', href: `#stop/${encodeURIComponent(stop.id)}` }, '前往編輯，補上地址或座標'),
+    statusButtons(stop),
+    h('details', { class: 'more' },
+      h('summary', null, '備援與編輯'),
+      fallbackActions(trip, stop),
+      h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(stop.id)}` }, '編輯此停靠點')));
+}
+
+function listCard(trip, stop, n) {
+  const open = state.expanded.has(stop.id);
+  const card = h('article', { class: `stop-card ${stop.status}${open ? ' open' : ''}` },
+    h('button', {
+      type: 'button', class: 'card-head', 'aria-expanded': open ? 'true' : 'false',
+      on: {
+        click: () => {
+          if (state.expanded.has(stop.id)) state.expanded.delete(stop.id); else state.expanded.add(stop.id);
+          render();
+        },
+      },
+    },
+    h('span', { class: 'num', text: String(n) }),
+    h('span', { class: 'head-main' },
+      h('span', { class: 'head-names' }, stopNames(stop)),
+      h('span', { class: 'head-meta' },
+        [timeText(stop), stop.city, C.MODE_LABELS[stop.defaultMode]].filter(Boolean).join('・'))),
+    statusBadge(stop)));
+
+  if (open) {
+    card.appendChild(h('div', { class: 'card-body' },
+      h('div', { class: 'meta-row' }, destinationTag(stop)),
+      stop.notes ? h('p', { class: 'notes', text: stop.notes }) : null,
+      navButton(trip, stop),
+      C.resolveDestination(stop).level ? modeSwitcher(stop) : null,
+      statusButtons(stop),
+      fallbackActions(trip, stop),
+      h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(stop.id)}` }, '編輯')));
+  } else if (stop.status === 'pending') {
+    card.appendChild(h('div', { class: 'card-quick' }, navButton(trip, stop)));
+  }
+  return card;
+}
+
+function isStandalone() {
+  return window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+}
+
+function onboardingCard() {
+  if (state.onboardingDismissed) return null;
+  const items = [];
+  if (!isStandalone()) items.push('用 Safari 開啟本頁 → 分享 → 「加入主畫面」，之後一律從主畫面圖示開啟（主畫面 App 與 Safari 的資料可能分開保存）。');
+  items.push('出發前請先在 Apple Maps 下載各城市的離線地圖（設定在 Apple Maps 內，本網頁無法代勞）。');
+  items.push('資料只存在這支手機。請在出發前與每天結束後，到「設定／備份」匯出備份。');
+  items.push('開啟地圖不會自動標記完成；到達或放棄後，請回到這裡手動標記。');
+  return h('section', { class: 'onboarding' },
+    h('h2', { text: '使用前提醒' }),
+    h('ul', null, items.map((t) => h('li', { text: t }))),
+    btn('我知道了', async () => {
+      state.onboardingDismissed = true;
+      await DB.setMeta('onboardingDismissed', true).catch(() => {});
+      render();
+    }, 'btn ghost small'));
+}
+
+function backupReminder(trip) {
+  if (!trip.stops.length) return null;
+  const last = state.lastExportAt ? new Date(state.lastExportAt) : null;
+  const stale = !last || (Date.now() - last.getTime()) > 24 * 3600 * 1000;
+  if (!stale) return null;
+  return h('section', { class: 'reminder' },
+    h('span', { text: last ? `上次備份：${formatLocalTime(state.lastExportAt, trip.timeZone)}（超過一天）` : '尚未匯出過備份' }),
+    btn('立即備份', () => exportBackup(), 'btn small'));
+}
+
+// ---------- 全部日期 ----------
+function viewDates(trip) {
+  const dates = C.listDates(trip.startDate, trip.endDate);
+  const cands = C.candidates(trip);
+  const all = C.progress(trip.stops.filter((s) => s.date !== null));
+  return h('div', { class: 'view dates-view' },
+    h('header', { class: 'page-header' },
+      h('div', { class: 'trip-title', text: trip.title }),
+      h('p', { class: 'sub', text: `${C.formatDateShort(trip.startDate)} – ${C.formatDateShort(trip.endDate)}・時區 ${trip.timeZone}` }),
+      h('p', { class: 'sub', text: `全程：完成 ${all.completed} / ${all.total}，略過 ${all.skipped}` })),
+    h('ul', { class: 'date-list' }, dates.map((d) => {
+      const stops = C.stopsForDate(trip, d);
+      const p = C.progress(stops);
+      const next = C.nextStop(trip, d);
+      const cities = C.citiesForDate(trip, d);
+      return h('li', null, h('button', {
+        type: 'button', class: `date-item${d === state.todayInTrip ? ' is-today' : ''}`,
+        on: { click: () => { state.viewDate = d; saveSession(); go('#today'); } },
+      },
+      h('span', { class: 'date-item-top' },
+        h('strong', { text: C.formatDateShort(d) }),
+        d === state.todayInTrip ? h('span', { class: 'chip today', text: '今天' }) : null,
+        cities.map((c) => h('span', { class: 'chip city', text: c }))),
+      h('span', { class: 'date-item-sub', text: stops.length ? `完成 ${p.completed} / ${p.total}・略過 ${p.skipped}${next ? `・下一站：${next.title}` : '・已全部處理'}` : '尚無停靠點' })));
+    })),
+    h('section', { class: 'cand-summary' },
+      h('h2', { class: 'section-title', text: `候選景點（${cands.length}）` }),
+      cands.length
+        ? h('ul', { class: 'plain-list' }, cands.map((s) => h('li', null, h('a', { href: `#stop/${encodeURIComponent(s.id)}` }, s.title), s.city ? `（${s.city}）` : '')))
+        : h('p', { class: 'hint', text: '尚未確定日期的地點可以先放在這裡，之後再排入某一天。' }),
+      h('a', { class: 'btn ghost', href: '#new/candidates' }, '＋ 新增候選景點')));
+}
+
+// ---------- 編輯行程（排序、刪除、候選） ----------
+function viewEditDay(trip) {
+  const stops = C.stopsForDate(trip, state.viewDate);
+  const cands = C.candidates(trip);
+  const wrap = h('div', { class: 'view edit-view' }, dayHeader(trip, { title: `編輯行程・${trip.title}` }));
+  wrap.appendChild(h('p', { class: 'hint', text: '用「上移／下移」調整順序；下一站依此順序決定，不會依時間自動重排。' }));
+
+  if (!stops.length) wrap.appendChild(h('p', { class: 'empty-line', text: '這一天沒有停靠點。' }));
+  wrap.appendChild(h('ol', { class: 'edit-list' }, stops.map((s, i) => h('li', { class: `edit-item ${s.status}` },
+    h('div', { class: 'edit-info' },
+      h('span', { class: 'num', text: String(i + 1) }),
+      h('span', { class: 'edit-names' }, stopNames(s), h('span', { class: 'head-meta', text: [timeText(s), s.city, C.STATUS_LABELS[s.status]].filter(Boolean).join('・') }))),
+    h('div', { class: 'edit-actions' },
+      btn('↑ 上移', () => reorder(s.id, -1), 'btn ghost small', { disabled: i === 0, 'aria-label': `上移 ${s.title}` }),
+      btn('↓ 下移', () => reorder(s.id, 1), 'btn ghost small', { disabled: i === stops.length - 1, 'aria-label': `下移 ${s.title}` }),
+      h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(s.id)}` }, '編輯'),
+      btn('移到候選', () => moveToDate(s.id, null), 'btn ghost small'),
+      btn('刪除', () => deleteStop(s.id), 'btn danger small'))))));
+
+  wrap.appendChild(h('div', { class: 'add-row' }, h('a', { class: 'btn primary', href: `#new/${state.viewDate}` }, `＋ 在 ${C.formatDateShort(state.viewDate)} 新增停靠點`)));
+
+  wrap.appendChild(h('h2', { class: 'section-title', text: `候選景點（${cands.length}）` }));
+  wrap.appendChild(h('p', { class: 'hint', text: '尚未決定日期的地點；按「排入本日」會加到目前所選日期的最後。' }));
+  wrap.appendChild(h('ul', { class: 'edit-list' }, cands.map((s) => h('li', { class: 'edit-item' },
+    h('div', { class: 'edit-info' }, h('span', { class: 'edit-names' }, stopNames(s), s.city ? h('span', { class: 'head-meta', text: s.city }) : null)),
+    h('div', { class: 'edit-actions' },
+      btn(`排入 ${C.formatDateShort(state.viewDate)}`, () => moveToDate(s.id, state.viewDate), 'btn small'),
+      h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(s.id)}` }, '編輯'),
+      btn('刪除', () => deleteStop(s.id), 'btn danger small'))))));
+  wrap.appendChild(h('div', { class: 'add-row' }, h('a', { class: 'btn ghost', href: '#new/candidates' }, '＋ 新增候選景點')));
+  return wrap;
+}
+
+async function reorder(stopId, delta) {
+  const trip = activeTrip();
+  const stops = C.moveStop(trip.stops, stopId, delta);
+  if (stops !== trip.stops) await commitTrip({ ...trip, stops });
+}
+
+async function moveToDate(stopId, date) {
+  const trip = activeTrip();
+  const before = trip.stops;
+  const ok = await commitTrip({ ...trip, stops: C.moveStopToDate(trip, stopId, date) });
+  if (ok) {
+    const s = trip.stops.find((x) => x.id === stopId);
+    toast(date ? `已排入 ${C.formatDateShort(date)}：${s.title}` : `已移到候選：${s.title}`, {
+      actionLabel: '復原',
+      action: () => commitTrip({ ...activeTrip(), stops: before }),
+    });
+  }
+}
+
+async function deleteStop(stopId) {
+  const trip = activeTrip();
+  const s = trip.stops.find((x) => x.id === stopId);
+  if (!s) return;
+  if (!window.confirm(`確定刪除「${s.title}」？`)) return;
+  const before = trip.stops;
+  let stops = trip.stops.filter((x) => x.id !== stopId);
+  stops = C.normalizeOrders(stops, s.date);
+  const ok = await commitTrip({ ...trip, stops });
+  if (ok) {
+    if (state.route.name === 'stop') go('#edit');
+    toast(`已刪除：${s.title}`, {
+      actionLabel: '復原',
+      action: () => commitTrip({ ...activeTrip(), stops: before }),
+      duration: 10000,
+    });
+  }
+}
+
+// ---------- 停靠點表單 ----------
+function field(label, input, hint) {
+  return h('label', { class: 'field' }, h('span', { class: 'field-label', text: label }), input, hint ? h('span', { class: 'field-hint', text: hint }) : null);
+}
+
+function viewStopForm(trip, stopId, newDateArg) {
+  const existing = stopId ? trip.stops.find((s) => s.id === stopId) : null;
+  if (stopId && !existing) {
+    return h('div', { class: 'view' }, h('p', { text: '找不到這個停靠點（可能已刪除）。' }), h('a', { class: 'btn', href: '#edit' }, '回到編輯行程'));
+  }
+  const initDate = existing ? existing.date : (newDateArg === 'candidates' ? null : (C.isValidDateString(newDateArg) ? newDateArg : state.viewDate));
+  const s = existing || C.createStop(trip, { date: initDate });
+  const dates = C.listDates(trip.startDate, trip.endDate);
+
+  const inp = {
+    title: h('input', { type: 'text', value: s.title || '', required: true, autocomplete: 'off', placeholder: '例：卡爾教堂' }),
+    localName: h('input', { type: 'text', value: s.localName || '', autocomplete: 'off', placeholder: '例：Karlskirche', lang: 'und' }),
+    city: h('input', { type: 'text', value: s.city || '', autocomplete: 'off', placeholder: '例：Vienna / Budapest', list: 'city-list' }),
+    type: h('select', null, C.STOP_TYPES.map((t) => h('option', { value: t, selected: t === s.type }, C.TYPE_LABELS[t]))),
+    date: h('select', null,
+      h('option', { value: '', selected: s.date === null }, '候選景點（未排日期）'),
+      dates.map((d) => h('option', { value: d, selected: d === s.date }, C.formatDateShort(d)))),
+    startTime: h('input', { type: 'time', value: s.startTime || '' }),
+    endTime: h('input', { type: 'time', value: s.endTime || '' }),
+    address: h('textarea', { rows: '2', placeholder: '完整地址（含郵遞區號與城市）', lang: 'und' }),
+    coordinates: h('input', { type: 'text', inputmode: 'decimal', value: C.formatCoords(s.coordinates), placeholder: '緯度, 經度（例：48.1982, 16.3719）', autocomplete: 'off' }),
+    entrance: h('input', { type: 'text', inputmode: 'decimal', value: C.formatCoords(s.entranceCoordinates), placeholder: '入口的 緯度, 經度（選填，優先使用）', autocomplete: 'off' }),
+    confirmed: h('input', { type: 'checkbox', checked: !!s.destinationConfirmed }),
+    mode: h('select', null, C.MODES.map((m) => h('option', { value: m, selected: m === s.defaultMode }, C.MODE_LABELS[m]))),
+    url: h('input', { type: 'url', value: s.referenceUrl || '', placeholder: 'https://（選填，例如官方網站或票券查詢頁）', autocomplete: 'off' }),
+    notes: h('textarea', { rows: '3', placeholder: '純文字備註（請勿填入票證密碼）' }),
+  };
+  inp.address.value = s.address || '';
+  inp.notes.value = s.notes || '';
+
+  const errorBox = h('div', { class: 'form-errors', role: 'alert' });
+  const preview = h('div', { class: 'dest-preview' });
+
+  function collect() {
+    const errors = [];
+    const title = inp.title.value.trim();
+    if (!title) errors.push('請填寫名稱。');
+    const coordsText = inp.coordinates.value.trim();
+    const entText = inp.entrance.value.trim();
+    const coordinates = coordsText ? C.parseCoordsInput(coordsText) : null;
+    const entranceCoordinates = entText ? C.parseCoordsInput(entText) : null;
+    if (coordsText && !coordinates) errors.push('地點座標格式應為「緯度, 經度」，且在合理範圍內。');
+    if (entText && !entranceCoordinates) errors.push('入口座標格式應為「緯度, 經度」，且在合理範圍內。');
+    const url = inp.url.value.trim();
+    if (url && !C.isSafeHttpsUrl(url)) errors.push('參考網址只接受 https:// 開頭。');
+    const st = inp.startTime.value || null;
+    const et = inp.endTime.value || null;
+    if (st && et && et < st) errors.push('結束時間早於開始時間。');
+    const draft = {
+      ...s,
+      title,
+      localName: inp.localName.value.trim() || null,
+      city: inp.city.value.trim(),
+      type: inp.type.value,
+      date: inp.date.value || null,
+      startTime: st,
+      endTime: et,
+      address: inp.address.value.trim() || null,
+      coordinates,
+      entranceCoordinates,
+      destinationConfirmed: inp.confirmed.checked,
+      defaultMode: inp.mode.value,
+      referenceUrl: url || null,
+      notes: inp.notes.value.trim() || null,
+      updatedAt: C.nowIso(),
+    };
+    return { errors, draft };
+  }
+
+  function updatePreview() {
+    const { draft } = collect();
+    const d = C.resolveDestination(draft);
+    preview.replaceChildren(
+      h('strong', { text: '導航目的地：' }),
+      d.level ? `${C.DESTINATION_LEVEL_LABELS[d.level]} → ${d.value}` : '尚無（需要地址、座標，或名稱＋城市）');
+    preview.className = `dest-preview ${d.level ? (d.level === 'name' ? 'warn' : 'ok') : 'none'}`;
+  }
+  Object.values(inp).forEach((el) => el.addEventListener('input', updatePreview));
+  updatePreview();
+
+  async function save() {
+    const { errors, draft } = collect();
+    errorBox.replaceChildren(...errors.map((e) => h('p', { text: e })));
+    if (errors.length) {
+      errorBox.scrollIntoView({ block: 'center' });
+      return;
+    }
+    let stops;
+    if (existing) {
+      if (existing.date !== draft.date) {
+        // 改日期：排到新日期的最後，並整理舊日期順序
+        draft.order = C.nextOrder(trip, draft.date);
+        stops = trip.stops.map((x) => (x.id === draft.id ? draft : x));
+        stops = C.normalizeOrders(stops, existing.date);
+      } else {
+        stops = trip.stops.map((x) => (x.id === draft.id ? draft : x));
+      }
+    } else {
+      draft.order = C.nextOrder(trip, draft.date);
+      stops = [...trip.stops, draft];
+    }
+    const ok = await commitTrip({ ...trip, stops }, { rerender: false });
+    if (!ok) return; // 表單內容保留，可直接重試
+    toast(existing ? `已儲存：${draft.title}` : `已新增：${draft.title}`, { duration: 2500 });
+    if (draft.date) state.viewDate = draft.date;
+    history.length > 1 && existing ? history.back() : go(draft.date ? '#today' : '#dates');
+  }
+
+  return h('div', { class: 'view form-view' },
+    h('header', { class: 'page-header' }, h('h1', { text: existing ? '編輯停靠點' : '新增停靠點' })),
+    h('form', { class: 'stop-form', novalidate: true, on: { submit: (e) => { e.preventDefault(); save(); } } },
+      errorBox,
+      h('fieldset', null, h('legend', { text: '基本資料' }),
+        field('名稱（必填）', inp.title),
+        field('當地語言原名', inp.localName, '導航時優先以原名搜尋，較準確'),
+        field('城市', inp.city),
+        h('datalist', { id: 'city-list' }, ['Vienna', 'Budapest', 'Bratislava'].map((c) => h('option', { value: c }))),
+        field('類型', inp.type),
+        field('日期', inp.date),
+        h('div', { class: 'two-col' }, field('開始時間', inp.startTime), field('結束時間', inp.endTime)),
+        field('預設交通方式', inp.mode)),
+      h('fieldset', null, h('legend', { text: '導航目的地' }),
+        h('p', { class: 'hint', text: '優先順序：入口座標 → 地點座標 → 地址 → 名稱＋城市。不確定的資料請留空，不要猜。' }),
+        field('地址', inp.address),
+        field('地點座標', inp.coordinates, '可在 Apple Maps 或 Google 地圖長按地點後複製座標'),
+        field('入口座標', inp.entrance, '火車站、大型景點、飯店建議填入口，避免導到建築中心'),
+        h('label', { class: 'check' }, inp.confirmed, h('span', { text: '我已實際確認這個目的地正確' })),
+        preview),
+      h('fieldset', null, h('legend', { text: '其他' }),
+        field('參考網址', inp.url),
+        field('備註', inp.notes)),
+      h('div', { class: 'form-actions' },
+        h('button', { type: 'submit', class: 'btn primary' }, '儲存'),
+        btn('取消', () => (history.length > 1 ? history.back() : go('#today')), 'btn ghost'),
+        existing ? btn('刪除此停靠點', () => deleteStop(existing.id), 'btn danger') : null)));
+}
+
+// ---------- 設定／備份 ----------
+function viewSettings(trip) {
+  const fileInput = h('input', {
+    type: 'file', accept: '.json,application/json', class: 'visually-hidden', id: 'import-file',
+    on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) },
+  });
+
+  const sections = [];
+  if (trip) {
+    sections.push(h('section', { class: 'card' },
+      h('h2', { text: '目前旅程' }),
+      h('p', { class: 'big-line', text: trip.title }),
+      h('p', { class: 'sub', text: `${trip.startDate} – ${trip.endDate}・時區 ${trip.timeZone}` }),
+      h('div', { class: 'btn-row' },
+        h('a', { class: 'btn ghost', href: '#tripform/edit' }, '編輯旅程資訊'),
+        h('a', { class: 'btn ghost', href: '#trips' }, `切換或新增旅程（共 ${state.trips.length}）`))));
+
+    sections.push(h('section', { class: 'card' },
+      h('h2', { text: '地圖' }),
+      field('預設地圖 App', h('select', {
+        on: { change: (e) => commitTrip({ ...trip, settings: { ...trip.settings, mapProvider: e.target.value } }) },
+      },
+      h('option', { value: 'apple', selected: trip.settings.mapProvider !== 'google' }, 'Apple Maps（建議 iPhone 使用）'),
+      h('option', { value: 'google', selected: trip.settings.mapProvider === 'google' }, 'Google 地圖（Android 或需要時）'))),
+      (trip.settings.mapProvider || 'apple') === 'apple' ? field('Apple Maps 連結格式', h('select', {
+        on: { change: (e) => commitTrip({ ...trip, settings: { ...trip.settings, appleLinkStyle: e.target.value } }) },
+      },
+      h('option', { value: 'unified', selected: (trip.settings.appleLinkStyle || 'unified') === 'unified' }, '官方統一網址（iOS 18.4 以上，預設）'),
+      h('option', { value: 'legacy', selected: trip.settings.appleLinkStyle === 'legacy' }, '舊式網址（相容性備援，無自行車）'),
+      h('option', { value: 'scheme', selected: trip.settings.appleLinkStyle === 'scheme' }, 'maps:// 直接開啟 App（若連結停留在網頁內時使用）')),
+      '請先用「導航測試」確認哪一種在您的 iPhone 上能直接跳到 Apple Maps。') : null,
+      h('a', { class: 'btn', href: '#maptest' }, '導航測試（實機驗證用）')));
+  }
+
+  sections.push(h('section', { class: 'card' },
+    h('h2', { text: '備份與還原' }),
+    h('p', { class: 'sub', text: state.lastExportAt ? `上次成功匯出：${formatLocalTime(state.lastExportAt, trip ? trip.timeZone : undefined)}` : '尚未匯出過備份' }),
+    h('p', { class: 'hint', text: '資料只保存在這支手機的這個 App 中，可能因清除網站資料或系統清理而消失。備份是必要的保險：建議出發前一次、每天結束後一次。備份檔含私人行程，請妥善保存。' }),
+    h('div', { class: 'btn-row' },
+      btn('匯出完整備份', () => exportBackup(), 'btn primary', { disabled: !state.trips.length }),
+      trip ? btn('匯出分享範本（不含完成紀錄與備註）', () => exportTemplate(trip), 'btn ghost') : null,
+      h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入備份或行程檔…'),
+      fileInput)));
+
+  sections.push(h('section', { class: 'card' },
+    h('h2', { text: '離線與儲存狀態' }),
+    h('ul', { class: 'plain-list' },
+      h('li', { text: `網路：${navigator.onLine ? '連線中' : '離線'}` }),
+      h('li', { text: `離線網站資料：${state.swState === 'ready' ? '已就緒（可離線開啟）' : state.swState === 'unsupported' ? '此瀏覽器不支援' : '尚未就緒——請連網開啟一次並稍候'}` }),
+      h('li', { text: `持久儲存：${state.persisted === true ? '已取得' : state.persisted === false ? '未取得（仍可使用，請定期備份）' : '檢查中'}` }),
+      h('li', { text: `開啟方式：${isStandalone() ? '主畫面 App' : 'Safari 分頁（建議改從主畫面開啟）'}` })),
+    h('p', { class: 'hint', text: '有網路不代表離線資料已準備好；請在出發前以飛航模式從主畫面重新開啟一次確認。Apple Maps 的離線地圖需在 Apple Maps 內自行下載。' }),
+    state.onboardingDismissed ? btn('重新顯示使用前提醒', async () => {
+      state.onboardingDismissed = false;
+      await DB.setMeta('onboardingDismissed', false).catch(() => {});
+      go('#today');
+    }, 'btn ghost small') : null));
+
+  if (trip) {
+    sections.push(h('section', { class: 'card danger-zone' },
+      h('h2', { text: '刪除旅程' }),
+      h('p', { class: 'hint', text: '會刪除此旅程的所有停靠點與紀錄。建議先匯出備份。' }),
+      btn(`刪除「${trip.title}」`, () => removeTrip(trip), 'btn danger')));
+  }
+
+  sections.push(h('p', { class: 'version', text: `旅程導航助手 v${APP_VERSION}・資料格式 v${C.SCHEMA_VERSION}・無帳號、無追蹤、資料不離開手機` }));
+  return h('div', { class: 'view settings-view' }, h('header', { class: 'page-header' }, h('h1', { text: '設定／備份' })), sections);
+}
+
+// ---------- 匯出 ----------
+function downloadOrShare(obj, filename, onDone) {
+  const json = JSON.stringify(obj, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  let file = null;
+  try {
+    file = new File([blob], filename, { type: 'application/json' });
+  } catch { /* 舊環境 */ }
+  // 必須在使用者點擊的同步流程中呼叫 share
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator.share({ files: [file], title: filename })
+      .then(() => onDone(true))
+      .catch((e) => {
+        if (e && e.name === 'AbortError') toast('已取消匯出', { duration: 2500 });
+        else fallbackDownload(blob, filename, onDone);
+      });
+    return;
+  }
+  fallbackDownload(blob, filename, onDone);
+}
+
+function fallbackDownload(blob, filename, onDone) {
+  const url = URL.createObjectURL(blob);
+  const a = h('a', { href: url, download: filename, class: 'visually-hidden' });
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 4000);
+  onDone(true);
+}
+
+function exportBackup() {
+  const trip = activeTrip();
+  const backup = C.buildBackup(state.trips);
+  const slug = state.trips.length === 1 ? C.slugForFile(state.trips[0].title) : 'trip';
+  const name = C.backupFileName(slug === 'trip' ? 'travel-companion-backup' : `${slug}-backup`, new Date(), trip ? trip.timeZone : undefined);
+  downloadOrShare(backup, name, async (ok) => {
+    if (!ok) return;
+    state.lastExportAt = backup.exportedAt;
+    await DB.setMeta('lastExportAt', backup.exportedAt).catch(() => {});
+    toast(`已匯出備份：${name}（請存到「檔案」或可靠位置）`, { duration: 5000 });
+    render();
+  });
+}
+
+function exportTemplate(trip) {
+  const tpl = C.buildTemplate(trip);
+  const name = C.backupFileName(`${C.slugForFile(trip.title)}-template`, new Date(), trip.timeZone);
+  downloadOrShare(tpl, name, () => toast('已匯出分享範本（已移除完成紀錄與備註）', { duration: 4000 }));
+}
+
+// ---------- 匯入 ----------
+async function handleImportFile(file, inputEl) {
+  if (!file) return;
+  try {
+    if (file.size > C.MAX_IMPORT_BYTES) {
+      toast('檔案過大，無法匯入。', { kind: 'error' });
+      return;
+    }
+    const text = await file.text();
+    const result = C.parseImport(text, file.size);
+    state.pendingImport = { ...result, fileName: file.name };
+    go('#import');
+  } catch (e) {
+    toast(`讀取檔案失敗：${e.message || e}`, { kind: 'error' });
+  } finally {
+    if (inputEl) inputEl.value = '';
+  }
+}
+
+function viewImport() {
+  const pi = state.pendingImport;
+  if (!pi) {
+    return h('div', { class: 'view' }, h('p', { text: '沒有待匯入的檔案。' }), h('a', { class: 'btn', href: '#settings' }, '回到設定'));
+  }
+  const cancel = () => { state.pendingImport = null; go('#settings'); };
+  if (!pi.ok) {
+    return h('div', { class: 'view import-view' },
+      h('header', { class: 'page-header' }, h('h1', { text: '無法匯入' })),
+      h('p', { text: `檔案「${pi.fileName}」沒有通過檢查，目前的資料完全沒有被更動。` }),
+      h('div', { class: 'form-errors' }, pi.errors.slice(0, 15).map((e) => h('p', { text: e })),
+        pi.errors.length > 15 ? h('p', { text: `……另有 ${pi.errors.length - 15} 項錯誤` }) : null),
+      btn('返回', cancel, 'btn'));
+  }
+
+  const isBackup = pi.kind === 'backup';
+  const existingIds = new Set(state.trips.map((t) => t.tripId));
+  const single = !isBackup ? pi.trips[0] : null;
+  const willReplaceSame = single && existingIds.has(single.tripId);
+
+  async function confirmImport() {
+    try {
+      if (isBackup) {
+        if (state.trips.length && !window.confirm('這會以備份檔「整份取代」目前手機中的所有旅程資料。確定繼續？')) return;
+        await DB.replaceAllTrips(pi.trips);
+        state.trips = pi.trips;
+      } else {
+        if (willReplaceSame && !window.confirm(`這會取代手機中同一個旅程「${single.title}」的資料。確定繼續？`)) return;
+        await DB.putTrip(single);
+        const idx = state.trips.findIndex((t) => t.tripId === single.tripId);
+        if (idx >= 0) state.trips[idx] = single; else state.trips.push(single);
+      }
+    } catch (e) {
+      toast(`匯入失敗：${e.message || e}。原有資料保持不變。`, { kind: 'error' });
+      return;
+    }
+    const target = isBackup ? (pi.trips.find((t) => t.tripId === state.activeTripId) || pi.trips[0]) : single;
+    state.pendingImport = null;
+    await switchTrip(target ? target.tripId : null);
+    toast('匯入完成', { duration: 3000 });
+    go('#today');
+  }
+
+  return h('div', { class: 'view import-view' },
+    h('header', { class: 'page-header' }, h('h1', { text: '確認匯入' })),
+    h('p', { class: 'sub', text: `檔案：${pi.fileName}` }),
+    h('p', { text: isBackup ? '這是完整備份檔。' : '這是單一旅程檔（或分享範本）。' }),
+    pi.exportedAt ? h('p', { class: 'sub', text: `匯出時間：${formatLocalTime(pi.exportedAt)}` }) : null,
+    pi.summary.map((s) => h('section', { class: 'card' },
+      h('p', { class: 'big-line', text: s.title }),
+      h('ul', { class: 'plain-list' },
+        h('li', { text: `日期：${s.startDate} – ${s.endDate}（${s.timeZone}）` }),
+        h('li', { text: `已排日期的停靠點：${s.total}（完成 ${s.completed}、略過 ${s.skipped}）` }),
+        h('li', { text: `候選景點：${s.candidates}` }),
+        existingIds.has(s.tripId) ? h('li', { class: 'warn-text', text: '手機中已有同一個旅程，將被取代。' }) : null))),
+    isBackup && state.trips.length
+      ? h('div', { class: 'warn-box' },
+        h('p', { text: `注意：匯入備份會整份取代手機中目前的 ${state.trips.length} 個旅程。建議先匯出現有資料。` }),
+        btn('先匯出目前資料', () => exportBackup(), 'btn ghost'))
+      : null,
+    h('div', { class: 'form-actions' },
+      btn(isBackup ? '確認整份取代' : (willReplaceSame ? '確認取代此旅程' : '加入為新旅程'), confirmImport, 'btn primary'),
+      btn('取消', cancel, 'btn ghost')));
+}
+
+// ---------- 旅程管理 ----------
+async function switchTrip(tripId) {
+  state.activeTripId = tripId;
+  await DB.setMeta('activeTripId', tripId).catch(() => {});
+  const trip = activeTrip();
+  if (trip) {
+    const r = C.resolveDefaultDate(trip);
+    state.viewDate = r.date;
+    state.phase = r.phase;
+    state.todayInTrip = r.today;
+  }
+  state.expanded.clear();
+  state.modeOverride = {};
+}
+
+function viewTrips() {
+  return h('div', { class: 'view' },
+    h('header', { class: 'page-header' }, h('h1', { text: '我的旅程' })),
+    h('ul', { class: 'date-list' }, state.trips
+      .slice().sort((a, b) => (a.startDate < b.startDate ? 1 : -1))
+      .map((t) => {
+        const p = C.progress(t.stops.filter((s) => s.date !== null));
+        return h('li', null, h('button', {
+          type: 'button', class: `date-item${t.tripId === state.activeTripId ? ' is-today' : ''}`,
+          on: { click: async () => { await switchTrip(t.tripId); go('#today'); } },
+        },
+        h('span', { class: 'date-item-top' }, h('strong', { text: t.title }), t.tripId === state.activeTripId ? h('span', { class: 'chip today', text: '使用中' }) : null),
+        h('span', { class: 'date-item-sub', text: `${t.startDate} – ${t.endDate}・完成 ${p.completed}/${p.total}` })));
+      })),
+    h('div', { class: 'btn-row' },
+      h('a', { class: 'btn primary', href: '#tripform/new' }, '＋ 建立新旅程'),
+      btn('載入示範旅程', loadDemo, 'btn ghost'),
+      h('a', { class: 'btn ghost', href: '#settings' }, '返回設定')));
+}
+
+function viewTripForm(trip) {
+  const isNew = !trip;
+  const tz0 = trip ? trip.timeZone : 'Europe/Vienna';
+  const tzOptions = C.COMMON_TIME_ZONES.includes(tz0) ? C.COMMON_TIME_ZONES : [tz0, ...C.COMMON_TIME_ZONES];
+  const inp = {
+    title: h('input', { type: 'text', value: trip ? trip.title : '', placeholder: '例：2026 中歐旅行', required: true }),
+    start: h('input', { type: 'date', value: trip ? trip.startDate : '' }),
+    end: h('input', { type: 'date', value: trip ? trip.endDate : '' }),
+    tz: h('select', null, tzOptions.map((z) => h('option', { value: z, selected: z === tz0 }, z)), h('option', { value: '__custom' }, '其他（自行輸入）…')),
+    tzCustom: h('input', { type: 'text', placeholder: 'IANA 時區，例：Europe/Lisbon', hidden: true }),
+    mode: h('select', null, C.MODES.map((m) => h('option', { value: m, selected: m === (trip ? trip.settings.defaultMode : 'walking') }, C.MODE_LABELS[m]))),
+  };
+  inp.tz.addEventListener('change', () => { inp.tzCustom.hidden = inp.tz.value !== '__custom'; });
+  const errorBox = h('div', { class: 'form-errors', role: 'alert' });
+
+  async function save() {
+    const errors = [];
+    const title = inp.title.value.trim();
+    const startDate = inp.start.value;
+    const endDate = inp.end.value;
+    const timeZone = inp.tz.value === '__custom' ? inp.tzCustom.value.trim() : inp.tz.value;
+    if (!title) errors.push('請填寫旅程名稱。');
+    if (!C.isValidDateString(startDate) || !C.isValidDateString(endDate)) errors.push('請填寫起訖日期。');
+    else if (startDate > endDate) errors.push('起始日不可晚於結束日。');
+    if (!C.isValidTimeZone(timeZone)) errors.push('時區名稱不正確。');
+    if (trip && !errors.length) {
+      const outside = trip.stops.filter((s) => s.date !== null && (s.date < startDate || s.date > endDate));
+      if (outside.length) errors.push(`有 ${outside.length} 個停靠點的日期會落在新期間之外（例如「${outside[0].title}」），請先改期或移到候選。`);
+    }
+    errorBox.replaceChildren(...errors.map((e) => h('p', { text: e })));
+    if (errors.length) return;
+    if (isNew) {
+      const t = C.createTrip({ title, timeZone, startDate, endDate, defaultMode: inp.mode.value });
+      const ok = await commitTrip(t, { rerender: false });
+      if (!ok) return;
+      await switchTrip(t.tripId);
+      go('#today');
+    } else {
+      const ok = await commitTrip({ ...trip, title, startDate, endDate, timeZone, settings: { ...trip.settings, defaultMode: inp.mode.value } }, { rerender: false });
+      if (!ok) return;
+      await switchTrip(trip.tripId);
+      go('#settings');
+    }
+  }
+
+  return h('div', { class: 'view form-view' },
+    h('header', { class: 'page-header' }, h('h1', { text: isNew ? '建立新旅程' : '編輯旅程資訊' })),
+    h('form', { class: 'stop-form', novalidate: true, on: { submit: (e) => { e.preventDefault(); save(); } } },
+      errorBox,
+      field('旅程名稱', inp.title),
+      h('div', { class: 'two-col' }, field('起始日（當地）', inp.start), field('結束日（當地）', inp.end)),
+      field('旅行地時區', inp.tz, '「今天」依此時區判斷，不受手機所在時區影響'),
+      inp.tzCustom,
+      field('預設交通方式', inp.mode),
+      h('div', { class: 'form-actions' },
+        h('button', { type: 'submit', class: 'btn primary' }, isNew ? '建立' : '儲存'),
+        btn('取消', () => (history.length > 1 ? history.back() : go('#today')), 'btn ghost'))));
+}
+
+async function removeTrip(trip) {
+  if (!window.confirm(`確定刪除「${trip.title}」與其所有紀錄？此動作無法復原（除非您有備份）。`)) return;
+  try {
+    await DB.deleteTrip(trip.tripId);
+  } catch (e) {
+    toast(`刪除失敗：${e.message || e}`, { kind: 'error' });
+    return;
+  }
+  state.trips = state.trips.filter((t) => t.tripId !== trip.tripId);
+  await switchTrip(state.trips[0] ? state.trips[0].tripId : null);
+  toast(`已刪除旅程：${trip.title}`);
+  go(state.trips.length ? '#today' : '#welcome');
+}
+
+// ---------- 歡迎（尚無旅程） ----------
+function viewWelcome() {
+  return h('div', { class: 'view welcome' },
+    h('header', { class: 'page-header' },
+      h('h1', { text: '旅程導航助手' }),
+      h('p', { class: 'sub', text: '已規劃行程的執行介面：看下一站 → 一按開啟 Apple Maps → 回來手動標記完成。' })),
+    h('div', { class: 'btn-col' },
+      h('a', { class: 'btn primary big', href: '#tripform/new' }, '建立新旅程'),
+      h('label', { class: 'btn big', for: 'welcome-import', role: 'button', tabindex: '0' }, '匯入備份或行程檔…'),
+      h('input', { type: 'file', accept: '.json,application/json', class: 'visually-hidden', id: 'welcome-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
+      btn('先看看示範旅程', loadDemo, 'btn ghost')),
+    h('section', { class: 'card' },
+      h('h2', { text: '開始之前' }),
+      h('ul', null,
+        h('li', { text: '請用 Safari 開啟，並「加入主畫面」，之後都從主畫面圖示開啟。' }),
+        h('li', { text: '不需要帳號；資料只存在這支手機，請定期匯出備份。' }),
+        h('li', { text: '本 App 不做即時路線規劃，路線由 Apple Maps 負責；離線地圖請在 Apple Maps 中事先下載。' }))));
+}
+
+async function loadDemo() {
+  try {
+    const res = await fetch('./data/demo-trip.json', { cache: 'no-cache' });
+    const text = await res.text();
+    const r = C.parseImport(text);
+    if (!r.ok) throw new Error(r.errors[0]);
+    const t = r.trips[0];
+    // 示範旅程每次載入都用新的 id，避免覆蓋
+    t.tripId = C.uuid();
+    t.stops = t.stops.map((s) => ({ ...s, id: C.uuid() }));
+    const ok = await commitTrip(t, { rerender: false });
+    if (!ok) return;
+    await switchTrip(t.tripId);
+    toast('已載入示範旅程（虛構資料，可隨時刪除）', { duration: 4000 });
+    go('#today');
+  } catch (e) {
+    toast(`無法載入示範旅程：${e.message || e}`, { kind: 'error' });
+  }
+}
+
+// ---------- 導航測試 ----------
+function viewMapTest(trip) {
+  const sample = {
+    title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna', address: null,
+    coordinates: null, entranceCoordinates: null, defaultMode: 'walking',
+  };
+  const sampleHu = { title: '漁人堡', localName: 'Halászbástya', city: 'Budapest' };
+  const rows = [];
+  for (const [label, opts] of [
+    ['官方統一網址', { provider: 'apple', appleStyle: 'unified' }],
+    ['舊式網址', { provider: 'apple', appleStyle: 'legacy' }],
+    ['maps:// 直接開 App', { provider: 'apple', appleStyle: 'scheme' }],
+    ['Google 地圖', { provider: 'google' }],
+  ]) {
+    rows.push(h('section', { class: 'card' },
+      h('h2', { text: label }),
+      h('div', { class: 'btn-col' },
+        h('a', { class: 'btn nav', href: C.buildDirectionsUrl(sample, 'walking', opts), rel: 'noopener' }, 'Karlskirche · 步行'),
+        h('a', { class: 'btn nav', href: C.buildDirectionsUrl(sample, 'transit', opts), rel: 'noopener' }, 'Karlskirche · 大眾運輸'),
+        h('a', { class: 'btn ghost', href: C.buildDirectionsUrl(sampleHu, 'walking', opts), rel: 'noopener' }, 'Halászbástya（匈牙利文字元）· 步行')),
+      h('code', { class: 'url', text: C.buildDirectionsUrl(sample, 'walking', opts) })));
+  }
+  return h('div', { class: 'view' },
+    h('header', { class: 'page-header' }, h('h1', { text: '導航測試' })),
+    h('p', { class: 'hint', text: '請在 iPhone 主畫面 App 中逐一點擊，記錄：是否直接切到地圖 App、目的地是否正確、交通方式是否正確、返回後本頁是否還在。若官方統一網址停留在網頁內，請到設定改用「maps:// 直接開啟 App」。' }),
+    rows,
+    trip ? h('a', { class: 'btn ghost', href: '#settings' }, '返回設定') : h('a', { class: 'btn ghost', href: '#' }, '返回'));
+}
+
+// ---------- 啟動 ----------
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) {
+    state.swState = 'unsupported';
+    return;
+  }
+  try {
+    const reg = await navigator.serviceWorker.register('./sw.js', { scope: './' });
+    const markReady = async () => {
+      const keys = await caches.keys();
+      state.swState = keys.some((k) => k.startsWith('tc-shell-')) ? 'ready' : 'unknown';
+      if (state.route.name === 'settings') render();
+    };
+    navigator.serviceWorker.ready.then(markReady);
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'CACHED') markReady();
+    });
+    const onWaiting = (worker) => {
+      state.updateReady = () => {
+        worker.postMessage({ type: 'SKIP_WAITING' });
+      };
+      renderStatusBar();
+    };
+    if (reg.waiting && navigator.serviceWorker.controller) onWaiting(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const nw = reg.installing;
+      if (!nw) return;
+      nw.addEventListener('statechange', () => {
+        if (nw.state === 'installed' && navigator.serviceWorker.controller) onWaiting(nw);
+        if (nw.state === 'activated') markReady();
+      });
+    });
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading || !state.updateReady) return;
+      reloading = true;
+      saveSession();
+      location.reload();
+    });
+  } catch (e) {
+    state.swState = 'unknown';
+    console.warn('Service Worker 註冊失敗', e);
+  }
+}
+
+async function init() {
+  try {
+    state.trips = await DB.getAllTrips();
+    state.lastExportAt = await DB.getMeta('lastExportAt', null);
+    state.onboardingDismissed = await DB.getMeta('onboardingDismissed', false);
+    const savedActive = await DB.getMeta('activeTripId', null);
+    const session = await DB.getMeta('session', null);
+    const activeId = state.trips.some((t) => t.tripId === savedActive) ? savedActive : (state.trips[0] && state.trips[0].tripId);
+    await switchTrip(activeId || null);
+    // 兩小時內重新開啟：回到原本的日期與頁面（例如從地圖 App 返回而 App 被系統重載）
+    if (session && Date.now() - session.savedAt < 2 * 3600 * 1000 && session.tripId === state.activeTripId) {
+      const trip = activeTrip();
+      if (trip && C.listDates(trip.startDate, trip.endDate).includes(session.viewDate)) state.viewDate = session.viewDate;
+      if (!location.hash && session.hash) history.replaceState(null, '', session.hash);
+      if (session.scrollY) scrollMemory.set(`${parseRoute().name}/${parseRoute().arg || ''}`, session.scrollY);
+    }
+  } catch (e) {
+    document.getElementById('main').replaceChildren(h('div', { class: 'view' },
+      h('h1', { text: '無法開啟本機資料庫' }),
+      h('p', { text: String(e.message || e) }),
+      h('p', { text: '若使用私密瀏覽模式，請改用一般模式或主畫面 App。' })));
+    return;
+  }
+
+  window.addEventListener('hashchange', () => { render(); saveSession(); });
+  window.addEventListener('online', renderStatusBar);
+  window.addEventListener('offline', renderStatusBar);
+  let scrollTimer = null;
+  window.addEventListener('scroll', () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(saveSession, 400);
+  }, { passive: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveSession();
+    else {
+      // 回到前景時重新判斷「今天」（例如跨過午夜）
+      const trip = activeTrip();
+      if (trip) {
+        const r = C.resolveDefaultDate(trip);
+        const dayChanged = r.today !== state.todayInTrip;
+        state.todayInTrip = r.today;
+        state.phase = r.phase;
+        if (dayChanged && r.phase === 'during' && !['stop', 'new', 'tripform', 'import'].includes(state.route.name)) {
+          state.viewDate = r.date;
+          render();
+        }
+      }
+    }
+  });
+
+  render();
+  registerServiceWorker();
+  DB.requestPersistence().then((p) => { state.persisted = p; });
+}
+
+init();
