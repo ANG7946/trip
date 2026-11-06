@@ -1,9 +1,9 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.2.1';
-import * as DB from './db.js?v=1.2.1';
-import * as V from './csv.js?v=1.2.1';
+import * as C from './core.js?v=1.2.2';
+import * as DB from './db.js?v=1.2.2';
+import * as V from './csv.js?v=1.2.2';
 
-export const APP_VERSION = '1.2.1';
+export const APP_VERSION = '1.2.2';
 
 // ---------- 狀態 ----------
 const state = {
@@ -234,6 +234,10 @@ function renderTabBar() {
       || (name === 'settings' && r === 'tripform');
     return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
   }));
+}
+
+function versionLine() {
+  return h('p', { class: 'version', text: `旅程導航助手 v${APP_VERSION}・資料格式 v${C.SCHEMA_VERSION}・無帳號、無追蹤、資料不離開手機` });
 }
 
 // ---------- 共用：回到「我的旅程」 ----------
@@ -822,7 +826,7 @@ function viewAppSettings() {
       toast('進入旅程時會再顯示使用前提醒', { duration: 3000 });
     }, 'btn ghost small') : null));
 
-  sections.push(h('p', { class: 'version', text: `旅程導航助手 v${APP_VERSION}・資料格式 v${C.SCHEMA_VERSION}・無帳號、無追蹤、資料不離開手機` }));
+  sections.push(versionLine());
   return h('div', { class: 'view settings-view' },
     h('header', { class: 'page-header' }, backLink(), h('h1', { text: 'App 設定／備份' })), sections);
 }
@@ -1209,7 +1213,8 @@ function viewTrips() {
       h('p', { class: 'hint', text: state.lastExportAt ? `上次備份：${formatLocalTime(state.lastExportAt)}。完整備份包含所有旅程。` : '尚未備份。完整備份包含所有旅程。' }),
       h('div', { class: 'btn-row' },
         btn('匯出完整備份', () => exportBackup(), 'btn'),
-        h('a', { class: 'btn ghost', href: '#app' }, '備份、地圖與 App 設定'))) : null);
+        h('a', { class: 'btn ghost', href: '#app' }, '備份、地圖與 App 設定'))) : null,
+    versionLine());
 }
 
 function viewTripForm(trip) {
@@ -1304,7 +1309,8 @@ function viewWelcome() {
       h('ul', null,
         h('li', { text: '請用 Safari 開啟，並「加入主畫面」，之後都從主畫面圖示開啟。' }),
         h('li', { text: '不需要帳號；資料只存在這支手機，請定期匯出備份。' }),
-        h('li', { text: '本 App 不做即時路線規劃，路線由 Apple Maps 負責；離線地圖請在 Apple Maps 中事先下載。' }))));
+        h('li', { text: '本 App 不做即時路線規劃，路線由 Apple Maps 負責；離線地圖請在 Apple Maps 中事先下載。' }))),
+    versionLine());
 }
 
 async function loadDemo() {
