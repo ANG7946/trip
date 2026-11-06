@@ -1,5 +1,5 @@
 // images.js — 使用者自己的照片：縮圖、編碼、批次指派
-import { normName } from './photos.js?v=1.5.2';
+import { normName } from './photos.js?v=1.6.0';
 
 export const MAX_SIDE = 640;     // 長邊像素
 export const JPEG_QUALITY = 0.78;
@@ -121,4 +121,41 @@ export function guessAssignments(files, targets, { dates = [], useOrder = true }
     });
   }
   return result;
+}
+
+// ---------- 同一地點（跨停靠點沿用照片） ----------
+function distM(a, b) {
+  const R = 6371000;
+  const r = (d) => (d * Math.PI) / 180;
+  const x = Math.sin(r(b.lat - a.lat) / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(r(b.lng - a.lng) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function coordsOf(s) {
+  const c = s.entranceCoordinates || s.coordinates;
+  return c && Number.isFinite(c.lat) && Number.isFinite(c.lng) ? c : null;
+}
+
+/**
+ * 兩個停靠點是否為同一地點（例如連住多晚的同一間飯店）：
+ * 地址相同；或座標相距 30 公尺內；或「名稱（當地名稱或中文名稱）＋城市」相同。
+ */
+export function samePlace(a, b) {
+  if (!a || !b || a.id === b.id) return false;
+  const aa = normName(a.address);
+  const ba = normName(b.address);
+  if (aa && ba && aa.length >= 6 && aa === ba) return true;
+  const ac = coordsOf(a);
+  const bc = coordsOf(b);
+  if (ac && bc && distM(ac, bc) <= 30) return true;
+  const city = (s) => normName(s.city);
+  if (city(a) !== city(b)) return false;
+  const keys = (s) => [s.localName, s.title].filter(Boolean).map(normName).filter((k) => k.length >= 2);
+  const ka = keys(a);
+  return keys(b).some((k) => ka.includes(k));
+}
+
+/** 依日期、順序排列，找出同一地點且有自己照片的第一個停靠點 */
+export function findSamePlaceWithPhoto(stops, stop, hasImage) {
+  const sorted = [...stops].sort((x, y) => ((x.date || '9999') < (y.date || '9999') ? -1 : (x.date || '9999') > (y.date || '9999') ? 1 : x.order - y.order));
+  return sorted.find((s) => s.userPhoto && s.userPhoto.id && hasImage(s.userPhoto.id) && samePlace(s, stop)) || null;
 }

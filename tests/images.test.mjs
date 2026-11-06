@@ -63,3 +63,31 @@ test('備份：只帶出仍被引用的照片；驗證照片格式；範本移�
   assert.match(C.parseImport(JSON.stringify(bad2)).errors.join(), /損壞/);
   assert.equal(C.buildTemplate(t).stops[0].userPhoto, null);
 });
+
+test('同一地點：地址相同、座標 30m 內、名稱＋城市相同', () => {
+  const h1 = { id: '1', title: '飯店（入住）', city: 'Vienna', address: 'Lemböckgasse 61, 1230 Wien' };
+  const h2 = { id: '2', title: '飯店（退房）', city: 'Vienna', address: 'Lemböckgasse 61, 1230 Wien' };
+  assert.equal(I.samePlace(h1, h2), true, '名稱不同但地址相同');
+  const c1 = { id: '3', title: 'A', city: 'X', coordinates: { lat: 48.18500, lng: 16.37600 } };
+  const c2 = { id: '4', title: 'B', city: 'Y', coordinates: { lat: 48.18510, lng: 16.37610 } };
+  assert.equal(I.samePlace(c1, c2), true, '約 13m');
+  const c3 = { ...c2, id: '5', coordinates: { lat: 48.1860, lng: 16.3770 } };
+  assert.equal(I.samePlace(c1, c3), false, '約 130m');
+  const n1 = { id: '6', title: '美景宮', localName: 'Schloss Belvedere', city: 'Vienna' };
+  const n2 = { id: '7', title: '美景宮花園', localName: 'Schloss Belvedere', city: 'Vienna' };
+  assert.equal(I.samePlace(n1, n2), true, '當地名稱＋城市相同');
+  assert.equal(I.samePlace(n1, { ...n2, city: 'Salzburg' }), false, '不同城市');
+  assert.equal(I.samePlace(n1, n1), false, '同一站本身不算');
+});
+
+test('找出同一地點中最早、且照片仍存在的那一站', () => {
+  const stops = [
+    { id: 'b', date: '2026-11-17', order: 1, title: 'Hotel Test', city: 'V', userPhoto: { id: 'img2' } },
+    { id: 'a', date: '2026-11-12', order: 1, title: 'Hotel Test', city: 'V', userPhoto: { id: 'img1' } },
+    { id: 'c', date: '2026-11-15', order: 2, title: 'Hotel Test', city: 'V' },
+    { id: 'gone', date: '2026-11-11', order: 1, title: 'Hotel Test', city: 'V', userPhoto: { id: 'deleted' } },
+  ];
+  const has = (id) => id !== 'deleted';
+  assert.equal(I.findSamePlaceWithPhoto(stops, stops[2], has).id, 'a');
+  assert.equal(I.findSamePlaceWithPhoto(stops, { id: 'z', title: 'Other', city: 'V' }, has), null);
+});

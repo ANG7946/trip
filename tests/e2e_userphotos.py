@@ -101,6 +101,31 @@ async def main():
         check('批次加入後共 4 張', '自己的照片 4 張' in sub, sub)
         await page.screenshot(path=f'{SHOTS}/31-photos.png', full_page=True)
 
+        # 同一地點自動沿用（例如連住多晚的飯店）：另一天新增同名同城市的停靠點
+        await page.goto(BASE + '#new/2026-11-13'); await page.wait_for_selector('.stop-form')
+        await page.fill('input[placeholder="例：卡爾教堂"]', '卡爾教堂（再訪）')
+        await page.fill('input[placeholder="例：Karlskirche"]', 'Karlskirche')
+        await page.fill('input[placeholder^="例：Vienna"]', 'Vienna')
+        await page.click('button[type=submit]'); await page.wait_for_timeout(500)
+        await page.goto(BASE + '#photos'); await page.wait_for_selector('.photos-view')
+        row = page.locator('.pm-row:has-text("卡爾教堂（再訪）")')
+        check('同一地點自動沿用照片（不需重新上傳）', '沿用同一地點' in await row.inner_text() and await row.locator('img').count() == 1)
+        sub2 = await page.inner_text('.photos-view .sub')
+        check('沿用不另存一份照片', '自己的照片 4 張' in sub2, sub2[:40])
+        await page.click('.seg:has-text("尚無照片")')
+        check('「尚無照片」篩選不列出已沿用者', await page.locator('.pm-row:has-text("卡爾教堂（再訪）")').count() == 0)
+        await page.click('.seg:has-text("全部")')
+        # 這一站不顯示照片
+        await page.goto(BASE + '#edit'); await page.wait_for_selector('.edit-view')
+        await page.select_option('.date-select', '2026-11-13')
+        await page.click('.edit-item:has-text("卡爾教堂（再訪）") >> a:has-text("編輯")')
+        await page.wait_for_selector('#photo-fs')
+        check('編輯頁說明沿用來源', '沿用同一地點' in await page.inner_text('#photo-fs'))
+        await page.click('#photo-fs button:has-text("這一站不顯示照片")'); await page.wait_for_timeout(300)
+        check('設定不顯示後，編輯頁不再顯示照片', await page.locator('#photo-fs img').count() == 0 and '不顯示照片' in await page.inner_text('#photo-fs'))
+        await page.goto(BASE + '#photos'); await page.wait_for_selector('.photos-view')
+        check('照片整理頁標示「不顯示照片」', '不顯示照片' in await page.locator('.pm-row:has-text("卡爾教堂（再訪）")').inner_text())
+
         # 表單：未儲存的欄位不會因上傳照片被清除
         await page.goto(BASE + '#edit'); await page.wait_for_selector('.edit-view')
         await page.click('.edit-view .edit-list >> nth=0 >> a:has-text("編輯") >> nth=0')

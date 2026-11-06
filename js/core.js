@@ -496,7 +496,8 @@ export function validateTrip(trip, label = '旅程') {
     if (s.status === 'skipped' && !s.skippedAt) e('已略過但缺少 skippedAt');
     if (s.status !== 'skipped' && s.skippedAt) e('非略過狀態卻有 skippedAt');
     if (typeof s.updatedAt !== 'string') e('缺少 updatedAt');
-    if (s.userPhoto !== undefined && s.userPhoto !== null && !(typeOf(s.userPhoto) === 'object' && typeof s.userPhoto.id === 'string' && s.userPhoto.id)) e('userPhoto 格式錯誤');
+    // userPhoto：{ id } 為自己的照片；{ none: true } 為「這一站不顯示照片」（不沿用同一地點）
+    if (s.userPhoto !== undefined && s.userPhoto !== null && !(typeOf(s.userPhoto) === 'object' && ((typeof s.userPhoto.id === 'string' && s.userPhoto.id) || s.userPhoto.none === true))) e('userPhoto 格式錯誤');
   });
   return errors;
 }

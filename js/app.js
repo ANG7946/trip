@@ -1,12 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.5.2';
-import * as DB from './db.js?v=1.5.2';
-import * as V from './csv.js?v=1.5.2';
-import * as X from './xlsx.js?v=1.5.2';
-import * as PH from './photos.js?v=1.5.2';
-import * as IM from './images.js?v=1.5.2';
+import * as C from './core.js?v=1.6.0';
+import * as DB from './db.js?v=1.6.0';
+import * as V from './csv.js?v=1.6.0';
+import * as X from './xlsx.js?v=1.6.0';
+import * as PH from './photos.js?v=1.6.0';
+import * as IM from './images.js?v=1.6.0';
 
-export const APP_VERSION = '1.5.2';
+export const APP_VERSION = '1.6.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -457,24 +457,48 @@ async function liveLookup(stopId) {
   } catch { /* 查詢失敗不影響行程操作 */ }
 }
 
+/**
+ * 停靠點實際要顯示的「我的照片」：
+ *  - { none: true }：這一站設定為不顯示照片
+ *  - { rec, inherited: false }：這一站自己的照片
+ *  - { rec, inherited: true, from }：沿用同一地點（例如連住多晚的飯店）其他停靠點的照片
+ */
+function userPhotoInfo(stop, trip = activeTrip()) {
+  if (!stop) return null;
+  const up = stop.userPhoto;
+  if (up && up.none) return { none: true };
+  if (up && up.id && state.images.has(up.id)) return { rec: state.images.get(up.id), inherited: false };
+  if (!trip) return null;
+  const src = IM.findSamePlaceWithPhoto(trip.stops, stop, (id) => state.images.has(id));
+  return src ? { rec: state.images.get(src.userPhoto.id), inherited: true, from: src } : null;
+}
+
 function userPhotoOf(stop) {
-  return stop && stop.userPhoto ? state.images.get(stop.userPhoto.id) || null : null;
+  const i = userPhotoInfo(stop);
+  return i && i.rec ? i.rec : null;
+}
+
+function samePlaceLabel(from) {
+  return `「${from.title}」${from.date ? `・${C.formatDateShort(from.date)}` : ''}`;
 }
 
 function userPhotoBlock(stop, variant) {
-  const rec = userPhotoOf(stop);
+  const info = userPhotoInfo(stop);
+  const rec = info && info.rec;
   const big = variant === 'wide' || expandedPhotos.has(stop.id);
   return h('figure', { class: `photo ${big ? 'wide' : 'side'}` },
     h('button', {
       type: 'button', class: 'photo-btn', 'aria-label': big ? '縮小照片' : '放大照片',
       on: { click: () => { if (variant === 'side') { if (expandedPhotos.has(stop.id)) expandedPhotos.delete(stop.id); else expandedPhotos.add(stop.id); render(); } } },
     }, h('img', { alt: `${stop.title}（我的照片）`, src: IM.dataUrl(rec), decoding: 'async' })),
-    big ? h('figcaption', null, h('span', { class: 'photo-credit', text: '我的照片' })) : null);
+    big ? h('figcaption', null, h('span', { class: 'photo-credit', text: info.inherited ? `我的照片（沿用同一地點 ${samePlaceLabel(info.from)}）` : '我的照片' })) : null);
 }
 
 function photoBlock(stop, { variant = 'wide' } = {}) {
-  // 自己的照片優先顯示，且不受維基百科照片開關影響（完全本機、不連網）
-  if (userPhotoOf(stop)) return userPhotoBlock(stop, variant);
+  // 自己的照片（含沿用同一地點）優先顯示，且不受維基百科照片開關影響（完全本機、不連網）
+  const upi = userPhotoInfo(stop);
+  if (upi && upi.none) return null;
+  if (upi && upi.rec) return userPhotoBlock(stop, variant);
   if (!state.photoPrefs.enabled || !PH.wantsPhoto(stop)) return null;
   const ph = stop.photo;
   if (!ph) {
@@ -547,6 +571,12 @@ async function removeUserPhoto(stopId) {
   if (!before || !before.userPhoto) return;
   const ok = await updateStop(stopId, (x) => ({ ...x, userPhoto: null }));
   if (ok) toast('已移除我的照片', { actionLabel: '復原', action: () => updateStop(stopId, (x) => ({ ...x, userPhoto: before.userPhoto })) });
+}
+
+async function setNoPhoto(stopId, none) {
+  const before = activeTrip().stops.find((x) => x.id === stopId);
+  const ok = await updateStop(stopId, (x) => ({ ...x, userPhoto: none ? { none: true } : null }));
+  if (ok && none) toast('這一站不再顯示照片', { actionLabel: '復原', action: () => updateStop(stopId, (x) => ({ ...x, userPhoto: before.userPhoto || null })) });
 }
 
 /** 刪除不再被任何停靠點引用的照片（啟動時與刪除旅程後執行） */
@@ -1021,7 +1051,11 @@ function refreshFormPhoto() {
 
 function photoFormSection(stop) {
   const cur = activeTrip().stops.find((x) => x.id === stop.id) || stop;
-  const mine = userPhotoOf(cur);
+  const info = userPhotoInfo(cur);
+  const none = !!(info && info.none);
+  const own = !!(info && info.rec && !info.inherited);
+  const inherited = !!(info && info.rec && info.inherited);
+  const mine = info && info.rec;
   const ph = cur.photo;
   const wikiOn = state.photoPrefs.enabled;
   const status = !ph ? '尚未配對維基百科照片。' : ph.hidden ? `維基百科照片已隱藏（${ph.title}）。` : `維基百科：${ph.title}${ph.confidence === 'low' ? '（自動配對，可能不準確）' : ''}`;
@@ -1041,12 +1075,17 @@ function photoFormSection(stop) {
     }
   }
   return h('fieldset', { id: 'photo-fs', dataset: { stopId: stop.id } }, h('legend', { text: '照片' }),
-    h('p', { class: 'hint', text: mine ? '目前顯示「我的照片」（優先於維基百科照片）。' : '可上傳自己的照片（例如飯店門口或入口的截圖），會自動縮小後保存在手機中。' }),
+    h('p', { class: 'hint', text: none ? '已設定這一站不顯示照片。'
+      : own ? '目前顯示「我的照片」（優先於維基百科照片）。同一地點的其他停靠點會自動沿用這張。'
+        : inherited ? `沿用同一地點 ${samePlaceLabel(info.from)} 的照片。要改用不同照片，直接上傳即可。`
+          : '可上傳自己的照片（例如飯店門口或入口的截圖），會自動縮小後保存在手機中；同一地點的其他停靠點會自動沿用。' }),
     mine ? userPhotoBlock(cur, 'wide') : null,
     h('div', { class: 'btn-row' },
-      btn(mine ? '更換我的照片' : '上傳自己的照片', () => pickImages({}, (files) => saveUserPhoto(stop.id, files[0])), 'btn small'),
-      mine ? btn('移除我的照片', () => removeUserPhoto(stop.id), 'btn ghost small') : null),
-    wikiOn ? [
+      btn(own ? '更換我的照片' : inherited ? '上傳不同的照片' : '上傳自己的照片', () => pickImages({}, (files) => saveUserPhoto(stop.id, files[0])), 'btn small'),
+      own ? btn('移除我的照片', () => removeUserPhoto(stop.id), 'btn ghost small') : null,
+      inherited || (!none && !own) ? btn('這一站不顯示照片', () => setNoPhoto(stop.id, true), 'btn ghost small') : null,
+      none ? btn('恢復顯示照片', () => setNoPhoto(stop.id, false), 'btn ghost small') : null),
+    wikiOn && !none ? [
       h('p', { class: 'hint', text: status }),
       !mine && ph && !ph.hidden ? photoBlock(cur, { variant: 'wide' }) : null,
       h('div', { class: 'btn-row' },
@@ -1077,11 +1116,12 @@ async function prefetchPhotos({ redo = false } = {}) {
   const targets = [];
   for (const t of state.trips) for (const st of t.stops) {
     // 已有自己照片的停靠點不需要維基百科照片
-    if (PH.wantsPhoto(st) && !st.userPhoto && !(st.photo && st.photo.hidden)) targets.push({ tripId: t.tripId, stopId: st.id, title: st.title });
+    if (PH.wantsPhoto(st) && !userPhotoInfo(st, t) && !(st.photo && st.photo.hidden)) targets.push({ tripId: t.tripId, stopId: st.id, title: st.title });
   }
   const job = { running: true, cancel: false, done: 0, total: targets.length, found: 0, failed: 0, notFound: 0, log: [] };
   state.photoJob = job;
   render();
+  const resolved = []; // 已處理的 { st, photo }：同一地點直接沿用，不重複查詢
   for (const { tripId, stopId, title } of targets) {
     if (job.cancel) break;
     const trip = state.trips.find((t) => t.tripId === tripId);
@@ -1091,14 +1131,22 @@ async function prefetchPhotos({ redo = false } = {}) {
       let photo = st && st.photo;
       const rejected = (photo && photo.rejected) || [];
       if (redo && photo && !photo.hidden) photo = null;
-      if (st && !photo) {
-        photo = await PH.lookupPhoto(st, { rejected });
-        if (photo) photo.rejected = rejected;
+      const needLookup = st && !photo;
+      const twin = needLookup ? resolved.find((d) => d.tripId === tripId && IM.samePlace(d.st, st)) : null;
+      if (needLookup) {
+        if (twin) {
+          // 同一地點：沿用已查到的結果（但排除這一站曾標記「不是這張」的條目）
+          photo = twin.photo && !rejected.includes(twin.photo.title) ? { ...twin.photo, rejected } : null;
+        } else {
+          photo = await PH.lookupPhoto(st, { rejected });
+          if (photo) photo.rejected = rejected;
+        }
         if (photo || redo) {
           const t2 = state.trips.find((t) => t.tripId === tripId);
           await commitTrip({ ...t2, stops: t2.stops.map((x) => (x.id === stopId ? { ...x, photo: photo || null } : x)) }, { rerender: false });
         }
       }
+      if (st) resolved.push({ tripId, st, photo: photo || null });
       if (!photo) {
         job.notFound += 1;
         job.log.push({ title, result: 'notfound', detail: '維基百科找不到對應條目' });
@@ -1198,7 +1246,7 @@ function photoTargets(trip, { onlyMissing = false } = {}) {
   for (const d of [...dates, null]) {
     C.stopsForDate(trip, d).forEach((s, i) => {
       if (s.type === 'transfer') return;
-      if (onlyMissing && s.userPhoto && state.images.has(s.userPhoto.id)) return;
+      if (onlyMissing && userPhotoInfo(s, trip)) return; // 已有、沿用同一地點，或設定不顯示
       out.push({ ...s, position: i + 1 });
     });
   }
@@ -1221,8 +1269,10 @@ function viewPhotos(trip) {
   const onlyMissing = state.photoFilterMissing === true;
   const list = photoTargets(trip, { onlyMissing });
   const allT = photoTargets(trip);
-  const mineCount = allT.filter((s) => userPhotoOf(s)).length;
-  const bytes = allT.reduce((a, s) => a + IM.imageBytes(userPhotoOf(s)), 0);
+  const ownIds = new Set(allT.map((s) => s.userPhoto && s.userPhoto.id).filter((id) => id && state.images.has(id)));
+  const mineCount = ownIds.size;
+  const covered = allT.filter((s) => userPhotoInfo(s, trip)).length;
+  const bytes = [...ownIds].reduce((a, id) => a + IM.imageBytes(state.images.get(id)), 0);
   let lastDate;
   const rows = [];
   for (const s of list) {
@@ -1230,26 +1280,29 @@ function viewPhotos(trip) {
       rows.push(h('li', { class: 'pm-date', text: s.date ? C.formatDateShort(s.date) : '候選景點' }));
       lastDate = s.date;
     }
-    const mine = userPhotoOf(s);
+    const info = userPhotoInfo(s, trip);
+    const own = info && info.rec && !info.inherited;
+    const kind = info && info.none ? '不顯示照片' : own ? '我的照片' : info && info.inherited ? `沿用同一地點（${info.from.date ? C.formatDateShort(info.from.date) : '候選'}）` : (s.photo && !s.photo.hidden && state.photoPrefs.enabled ? '維基百科' : '');
     rows.push(h('li', { class: 'pm-row' },
-      photoThumb(s),
+      info && info.none ? h('span', { class: 'pm-thumb empty', text: '—' }) : photoThumb(s),
       h('span', { class: 'pm-info' },
         h('span', { class: 'stop-title', text: s.title }),
-        h('span', { class: 'head-meta', text: [s.date ? `第 ${s.position} 站` : '', s.city, mine ? '我的照片' : (s.photo && !s.photo.hidden && state.photoPrefs.enabled ? '維基百科' : '')].filter(Boolean).join('・') })),
+        h('span', { class: 'head-meta', text: [s.date ? `第 ${s.position} 站` : '', s.city, kind].filter(Boolean).join('・') })),
       h('span', { class: 'pm-actions' },
-        btn(mine ? '更換' : '選照片', () => pickImages({}, (files) => saveUserPhoto(s.id, files[0])), 'btn small'),
-        mine ? btn('移除', () => removeUserPhoto(s.id), 'btn ghost small') : null)));
+        btn(own ? '更換' : info && info.inherited ? '改用別張' : '選照片', () => pickImages({}, (files) => saveUserPhoto(s.id, files[0])), 'btn small'),
+        own ? btn('移除', () => removeUserPhoto(s.id), 'btn ghost small') : null,
+        info && info.none ? btn('恢復', () => setNoPhoto(s.id, false), 'btn ghost small') : null)));
   }
   return h('div', { class: 'view photos-view' },
     h('header', { class: 'page-header' }, tripSwitch(trip.title), h('h1', { text: '照片整理' })),
-    h('p', { class: 'sub', text: `自己的照片 ${mineCount} 張（約 ${Math.max(1, Math.round(bytes / 1024))} KB）。照片會自動縮小（長邊 640px），原始照片仍留在您的相簿。` }),
+    h('p', { class: 'sub', text: `自己的照片 ${mineCount} 張（約 ${Math.max(1, Math.round(bytes / 1024))} KB），涵蓋 ${covered} 個停靠點。同一地點（例如連住多晚的飯店）只需上傳一次。照片會自動縮小（長邊 640px），原始照片仍留在您的相簿。` }),
     h('section', { class: 'card' },
       h('h2', { text: '一次加入多張' }),
       h('p', { class: 'hint', text: '一次選取多張照片：檔名含地點名稱（例：Karlskirche.jpg、卡爾教堂.png）或「日期＿第幾站」（例：11-12_2.jpg、D1-2.jpg）會自動配對；其餘依選取順序配給下方「尚無照片」的停靠點。確認前都可以修改，不會直接寫入。' }),
       btn('選取多張照片…', () => pickImages({ multiple: true }, (files) => startBatchAssign(trip, files)), 'btn primary')),
     h('div', { class: 'seg-row', role: 'group', 'aria-label': '篩選' },
       h('button', { type: 'button', class: `seg${!onlyMissing ? ' on' : ''}`, 'aria-pressed': String(!onlyMissing), on: { click: () => { state.photoFilterMissing = false; render(); } } }, `全部（${allT.length}）`),
-      h('button', { type: 'button', class: `seg${onlyMissing ? ' on' : ''}`, 'aria-pressed': String(onlyMissing), on: { click: () => { state.photoFilterMissing = true; render(); } } }, `尚無我的照片（${allT.length - mineCount}）`)),
+      h('button', { type: 'button', class: `seg${onlyMissing ? ' on' : ''}`, 'aria-pressed': String(onlyMissing), on: { click: () => { state.photoFilterMissing = true; render(); } } }, `尚無照片（${allT.length - covered}）`)),
     list.length ? h('ul', { class: 'pm-list' }, rows) : h('p', { class: 'empty-line', text: onlyMissing ? '每個停靠點都已有自己的照片。' : '沒有停靠點。' }),
     h('p', { class: 'hint', text: '交通移動類的停靠點不列入。維基百科照片可在「App 設定／備份」開啟並批次下載。' }));
 }
@@ -1275,7 +1328,11 @@ function viewPhotoAssign(trip) {
   pp.items.forEach((it) => { if (it.stopId) counts.set(it.stopId, (counts.get(it.stopId) || 0) + 1); });
   const assigned = pp.items.filter((it) => it.stopId).length;
   const dup = [...counts.values()].some((n) => n > 1);
-  const label = (s) => `${s.date ? C.formatDateShort(s.date) : '候選'} ${s.date ? `#${s.position} ` : ''}${s.title}${userPhotoOf(s) ? '（已有照片，將取代）' : ''}`;
+  const label = (s) => {
+    const i = userPhotoInfo(s, trip);
+    const note = i && i.rec && !i.inherited ? '（已有照片，將取代）' : i && i.inherited ? '（目前沿用同一地點）' : '';
+    return `${s.date ? C.formatDateShort(s.date) : '候選'} ${s.date ? `#${s.position} ` : ''}${s.title}${note}`;
+  };
   const cancel = () => { pp.items.forEach((it) => URL.revokeObjectURL(it.preview)); state.pendingPhotos = null; go('#photos'); };
   const progress = h('p', { class: 'sub', id: 'assign-progress' });
 
