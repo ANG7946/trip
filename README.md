@@ -32,6 +32,7 @@ tests/core.test.mjs      邏輯單元測試（Node 內建 test runner）
 tests/csv.test.mjs       CSV／AI JSON 匯入單元測試
 tests/e2e_playwright.py  瀏覽器端對端測試（主要流程）
 tests/e2e_import.py      瀏覽器端對端測試（匯入）
+tools/bump-version.mjs   發佈新版本時一次更新所有版本字串
 private/                 私人行程（已列入 .gitignore，不會上傳）
 ```
 
@@ -59,7 +60,7 @@ Service Worker 只在 `https://` 或 `localhost` 下運作。
 - GitHub → Settings → Pages → Custom domain 填 `trip.tclin.tw`；憑證核發後，勾選 **Enforce HTTPS**。
 - iPhone 的本機資料綁定網域。請直接以 `https://trip.tclin.tw/` 加入主畫面並匯入行程，不要用 github.io 網址，以免日後重新匯入。
 
-**發佈新版本時**：修改 `sw.js` 裡的 `VERSION`（例如改成 `1.0.1`）。使用者開啟 App 後會看到「有新版本可用 → 重新載入」。IndexedDB 中的行程不會被動到。
+**發佈新版本時**：執行 `node tools/bump-version.mjs 1.1.2`（換成新版本號），會一次更新資產網址的 `?v=`、Service Worker 快取名稱與 App 版本，避免瀏覽器或 CDN 混用新舊檔案。使用者開啟 App 後會看到「有新版本可用 → 重新載入」。IndexedDB 中的行程不會被動到。
 
 ## 4. 在 iPhone 上安裝與匯入私人行程
 

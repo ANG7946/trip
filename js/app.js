@@ -1,9 +1,9 @@
 // app.js — 介面與互動
-import * as C from './core.js';
-import * as DB from './db.js';
-import * as V from './csv.js';
+import * as C from './core.js?v=1.1.1';
+import * as DB from './db.js?v=1.1.1';
+import * as V from './csv.js?v=1.1.1';
 
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.1.1';
 
 // ---------- 狀態 ----------
 const state = {
