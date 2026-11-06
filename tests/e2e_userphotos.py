@@ -109,6 +109,26 @@ async def main():
         await choose(page, '#photo-fs button:has-text("我的照片")', [form_img])
         await page.wait_for_selector('.toast.show:has-text("已加入照片")')
         check('上傳照片後，尚未儲存的備註仍在', await page.input_value('textarea[placeholder^="純文字備註"]') == '尚未儲存的備註')
+        form_src = await page.get_attribute('#photo-fs img', 'src')
+        stop_hash = await page.evaluate('location.hash')
+        await page.click('button[type=submit]'); await page.wait_for_timeout(500)
+        await page.goto(BASE + stop_hash); await page.wait_for_selector('.stop-form')
+        check('按「儲存」後再開編輯頁，照片仍在（且是剛上傳那張）', await page.get_attribute('#photo-fs img', 'src') == form_src)
+        check('按「儲存」後備註也一起存入', await page.input_value('textarea[placeholder^="純文字備註"]') == '尚未儲存的備註')
+        await page.reload(); await page.wait_for_selector('.stop-form')
+        check('重新整理後照片仍在', await page.get_attribute('#photo-fs img', 'src') == form_src)
+
+        # 新增停靠點後再上傳 → 儲存 → 顯示在今天的下一站
+        await page.goto(BASE + '#today'); await page.wait_for_selector('.today-view')
+        first_title = (await page.inner_text('.next-card .stop-title')).strip()
+        await page.click('.next-card summary'); await page.click('.next-card a:has-text("編輯此停靠點")')
+        await page.wait_for_selector('.stop-form')
+        await choose(page, '#photo-fs button:has-text("我的照片")', [single])
+        await page.wait_for_selector('.toast.show:has-text("已加入照片")')
+        await page.click('button[type=submit]'); await page.wait_for_timeout(500)
+        await page.goto(BASE + '#today'); await page.wait_for_selector('.next-card')
+        src2 = await page.get_attribute('.next-card .photo img', 'src')
+        check(f'編輯頁上傳並儲存後，行程卡片顯示照片（{first_title}）', bool(src2) and src2.startswith('data:image/jpeg'))
 
         # 備份（含／不含照片）
         await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')

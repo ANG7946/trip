@@ -1,12 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.5.1';
-import * as DB from './db.js?v=1.5.1';
-import * as V from './csv.js?v=1.5.1';
-import * as X from './xlsx.js?v=1.5.1';
-import * as PH from './photos.js?v=1.5.1';
-import * as IM from './images.js?v=1.5.1';
+import * as C from './core.js?v=1.5.2';
+import * as DB from './db.js?v=1.5.2';
+import * as V from './csv.js?v=1.5.2';
+import * as X from './xlsx.js?v=1.5.2';
+import * as PH from './photos.js?v=1.5.2';
+import * as IM from './images.js?v=1.5.2';
 
-export const APP_VERSION = '1.5.1';
+export const APP_VERSION = '1.5.2';
 
 // ---------- 狀態 ----------
 const state = {
@@ -836,8 +836,9 @@ function viewStopForm(trip, stopId, newDateArg) {
       defaultMode: inp.mode.value,
       referenceUrl: url || null,
       notes: inp.notes.value.trim() || null,
-      // 縮圖可能在表單開啟期間被更新，以資料庫中最新的為準
+      // 照片（維基百科與我的照片）可能在表單開啟期間被更新，以資料庫中最新的為準
       photo: ((activeTrip().stops.find((x) => x.id === s.id)) || s).photo || null,
+      userPhoto: ((activeTrip().stops.find((x) => x.id === s.id)) || s).userPhoto || null,
       updatedAt: C.nowIso(),
     };
     return { errors, draft };
