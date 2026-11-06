@@ -1,10 +1,11 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.3.1';
-import * as DB from './db.js?v=1.3.1';
-import * as V from './csv.js?v=1.3.1';
-import * as X from './xlsx.js?v=1.3.1';
+import * as C from './core.js?v=1.4.0';
+import * as DB from './db.js?v=1.4.0';
+import * as V from './csv.js?v=1.4.0';
+import * as X from './xlsx.js?v=1.4.0';
+import * as PH from './photos.js?v=1.4.0';
 
-export const APP_VERSION = '1.3.1';
+export const APP_VERSION = '1.4.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -23,6 +24,8 @@ const state = {
   updateReady: null,
   route: { name: 'today', arg: null },
   mapPrefs: { provider: 'apple', appleStyle: 'unified' }, // 本機設定，所有旅程共用
+  photoPrefs: { enabled: false, allowLive: false },       // 縮圖：預設關閉；即時下載另行開啟
+  photoJob: null,                                          // 預先下載進度
 };
 
 const main = () => document.getElementById('main');
@@ -411,11 +414,90 @@ function viewToday(trip) {
   return wrap;
 }
 
+// ---------- 縮圖 ----------
+const photoUrls = new Map();     // thumbUrl → objectURL（避免重複讀取）
+const photoLookups = new Set();  // 本次開啟已嘗試查詢的停靠點
+const expandedPhotos = new Set();
+
+function safeHttps(u) {
+  return typeof u === 'string' && /^https:\/\//.test(u) ? u : null;
+}
+
+/** 將圖片載入 img：先讀本機快取；允許即時下載且有網路時才連線。 */
+async function fillPhoto(img, holder, url) {
+  try {
+    if (photoUrls.has(url)) { img.src = photoUrls.get(url); return; }
+    let blob = await PH.cachedBlob(url);
+    if (!blob && state.photoPrefs.allowLive && navigator.onLine) blob = await PH.downloadToCache(url);
+    if (!blob) { holder.remove(); return; }
+    const ou = URL.createObjectURL(blob);
+    photoUrls.set(url, ou);
+    img.src = ou;
+  } catch {
+    holder.remove();
+  }
+}
+
+async function liveLookup(stopId) {
+  const trip = activeTrip();
+  const stop = trip && trip.stops.find((x) => x.id === stopId);
+  if (!stop || stop.photo) return;
+  try {
+    const photo = await PH.lookupPhoto(stop);
+    if (photo) await updateStop(stopId, (x) => ({ ...x, photo }));
+  } catch { /* 查詢失敗不影響行程操作 */ }
+}
+
+function photoBlock(stop, { variant = 'wide' } = {}) {
+  if (!state.photoPrefs.enabled || !PH.wantsPhoto(stop)) return null;
+  const ph = stop.photo;
+  if (!ph) {
+    if (state.photoPrefs.allowLive && navigator.onLine && !photoLookups.has(stop.id)) {
+      photoLookups.add(stop.id);
+      liveLookup(stop.id);
+    }
+    return null;
+  }
+  if (ph.hidden || !PH.isWikimediaUrl(ph.thumbUrl)) return null;
+  const big = variant === 'wide' || expandedPhotos.has(stop.id);
+  const img = h('img', { alt: `${stop.title} 的參考照片`, loading: 'lazy', decoding: 'async' });
+  const credit = [ph.artist || '作者不詳', ph.license].filter(Boolean).join('・');
+  const fig = h('figure', { class: `photo ${big ? 'wide' : 'side'}` },
+    h('button', {
+      type: 'button', class: 'photo-btn', 'aria-label': big ? '縮小照片' : '放大照片',
+      on: { click: () => { if (variant === 'side') { if (expandedPhotos.has(stop.id)) expandedPhotos.delete(stop.id); else expandedPhotos.add(stop.id); render(); } } },
+    }, img),
+    big ? h('figcaption', null,
+      ph.confidence === 'low' ? h('span', { class: 'photo-warn', text: '自動配對，可能不是這個地點' }) : null,
+      h('span', { class: 'photo-credit' },
+        '圖片：', safeHttps(ph.fileUrl) ? h('a', { href: ph.fileUrl, target: '_blank', rel: 'noopener noreferrer' }, credit) : credit,
+        ph.licenseUrl && safeHttps(ph.licenseUrl) ? [' ', h('a', { href: ph.licenseUrl, target: '_blank', rel: 'noopener noreferrer' }, '授權')] : null,
+        '・維基百科：', safeHttps(ph.pageUrl) ? h('a', { href: ph.pageUrl, target: '_blank', rel: 'noopener noreferrer' }, ph.title) : ph.title),
+      btn('不是這張', () => rejectPhoto(stop.id), 'btn ghost small')) : null);
+  fillPhoto(img, fig, ph.thumbUrl);
+  return fig;
+}
+
+async function rejectPhoto(stopId) {
+  const trip = activeTrip();
+  const before = trip.stops.find((x) => x.id === stopId);
+  if (!before || !before.photo) return;
+  const ok = await updateStop(stopId, (x) => ({ ...x, photo: { ...x.photo, hidden: true } }));
+  if (ok) {
+    toast('已隱藏這張照片。可到「編輯」重新搜尋另一張。', {
+      actionLabel: '復原',
+      action: () => updateStop(stopId, (x) => ({ ...x, photo: before.photo })),
+    });
+  }
+}
+
 function nextCard(trip, stop) {
   const d = C.resolveDestination(stop);
   return h('section', { class: 'next-card', 'aria-label': '下一站' },
     h('div', { class: 'next-label' }, '下一站'),
-    h('h2', { class: 'next-name' }, stopNames(stop)),
+    h('div', { class: 'next-head' },
+      h('h2', { class: 'next-name' }, stopNames(stop)),
+      photoBlock(stop, { variant: 'side' })),
     h('div', { class: 'meta-row' },
       timeText(stop) ? h('span', { class: 'meta time', text: timeText(stop) }) : null,
       stop.city ? h('span', { class: 'meta', text: stop.city }) : null,
@@ -452,6 +534,7 @@ function listCard(trip, stop, n) {
 
   if (open) {
     card.appendChild(h('div', { class: 'card-body' },
+      photoBlock(stop, { variant: 'wide' }),
       h('div', { class: 'meta-row' }, destinationTag(stop)),
       stop.notes ? h('p', { class: 'notes', text: stop.notes }) : null,
       navButton(trip, stop),
@@ -669,6 +752,8 @@ function viewStopForm(trip, stopId, newDateArg) {
       defaultMode: inp.mode.value,
       referenceUrl: url || null,
       notes: inp.notes.value.trim() || null,
+      // 縮圖可能在表單開啟期間被更新，以資料庫中最新的為準
+      photo: ((activeTrip().stops.find((x) => x.id === s.id)) || s).photo || null,
       updatedAt: C.nowIso(),
     };
     return { errors, draft };
@@ -736,6 +821,7 @@ function viewStopForm(trip, stopId, newDateArg) {
       h('fieldset', null, h('legend', { text: '其他' }),
         field('參考網址', inp.url),
         field('備註', inp.notes)),
+      existing && state.photoPrefs.enabled ? photoFormSection(existing) : null,
       h('div', { class: 'form-actions' },
         h('button', { type: 'submit', class: 'btn primary' }, '儲存'),
         btn('取消', () => (history.length > 1 ? history.back() : go('#today')), 'btn ghost'),
@@ -805,6 +891,8 @@ function viewAppSettings() {
     '請先用「導航測試」確認哪一種在您的 iPhone 上能直接跳到 Apple Maps。') : null,
     h('a', { class: 'btn', href: '#maptest' }, '導航測試（實機驗證用）')));
 
+  sections.push(photoSettingsCard());
+
   sections.push(h('section', { class: 'card' },
     h('h2', { text: '建立行程檔（自己用或分享給朋友）' }),
     h('p', { class: 'hint', text: '除了在 App 內逐筆新增，也可以用 Excel／CSV 範本填寫，或請 AI 依提示詞把行程轉成 JSON，再匯入。' }),
@@ -831,6 +919,128 @@ function viewAppSettings() {
   sections.push(versionLine());
   return h('div', { class: 'view settings-view' },
     h('header', { class: 'page-header' }, backLink(), h('h1', { text: 'App 設定／備份' })), sections);
+}
+
+function photoFormSection(stop) {
+  const ph = stop.photo;
+  const status = !ph ? '尚未配對照片。' : ph.hidden ? `已隱藏（${ph.title}）。` : `目前：${ph.title}${ph.confidence === 'low' ? '（自動配對，可能不準確）' : ''}`;
+  async function research() {
+    if (!navigator.onLine) { toast('需要網路才能搜尋', { duration: 3000 }); return; }
+    const rejected = ph ? [...(ph.rejected || []), ph.title] : [];
+    const cur = activeTrip().stops.find((x) => x.id === stop.id);
+    try {
+      const photo = await PH.lookupPhoto(cur, { rejected });
+      if (photo) photo.rejected = rejected;
+      await updateStop(stop.id, (x) => ({ ...x, photo: photo || (ph ? { ...ph, hidden: true, rejected } : null) }));
+      if (photo) {
+        await PH.downloadToCache(photo.thumbUrl).catch(() => {});
+        toast(`找到：${photo.title}`, { duration: 3000 });
+      } else toast('沒有找到其他照片', { duration: 3000 });
+    } catch (e) {
+      toast(`搜尋失敗：${e.message || e}`, { kind: 'error' });
+    }
+  }
+  return h('fieldset', null, h('legend', { text: '參考照片（維基百科）' }),
+    h('p', { class: 'hint', text: status }),
+    ph && !ph.hidden ? photoBlock(stop, { variant: 'wide' }) : null,
+    h('div', { class: 'btn-row' },
+      btn(ph ? '重新搜尋（排除目前這張）' : '搜尋照片', research, 'btn ghost small'),
+      ph && ph.hidden ? btn('恢復顯示', () => updateStop(stop.id, (x) => ({ ...x, photo: { ...x.photo, hidden: false } })), 'btn ghost small') : null,
+      ph ? btn('移除照片', () => updateStop(stop.id, (x) => ({ ...x, photo: null })), 'btn ghost small') : null));
+}
+
+async function setPhotoPrefs(patch) {
+  const next = { ...state.photoPrefs, ...patch };
+  if (!next.enabled) next.allowLive = false;
+  try {
+    await DB.setMeta('photoPrefs', next);
+  } catch (e) {
+    toast(`儲存失敗：${e.message || e}`, { kind: 'error' });
+    return;
+  }
+  state.photoPrefs = next;
+  render();
+}
+
+/** 預先下載所有旅程的縮圖（建議在臺灣用 Wi‑Fi 執行）。 */
+async function prefetchPhotos() {
+  if (state.photoJob && state.photoJob.running) return;
+  if (!navigator.onLine) { toast('目前沒有網路，請連上 Wi‑Fi 後再試', { duration: 4000 }); return; }
+  const targets = [];
+  for (const t of state.trips) for (const st of t.stops) {
+    if (PH.wantsPhoto(st) && !(st.photo && st.photo.hidden)) targets.push({ tripId: t.tripId, stopId: st.id });
+  }
+  const job = { running: true, cancel: false, done: 0, total: targets.length, found: 0, failed: 0 };
+  state.photoJob = job;
+  render();
+  for (const { tripId, stopId } of targets) {
+    if (job.cancel) break;
+    const trip = state.trips.find((t) => t.tripId === tripId);
+    const st = trip && trip.stops.find((x) => x.id === stopId);
+    try {
+      let photo = st && st.photo;
+      if (st && !photo) {
+        photo = await PH.lookupPhoto(st);
+        if (photo) {
+          const t2 = state.trips.find((t) => t.tripId === tripId);
+          await commitTrip({ ...t2, stops: t2.stops.map((x) => (x.id === stopId ? { ...x, photo } : x)) }, { rerender: false });
+        }
+      }
+      if (photo && !(await PH.cachedBlob(photo.thumbUrl))) await PH.downloadToCache(photo.thumbUrl);
+      if (photo) job.found += 1;
+    } catch {
+      job.failed += 1;
+    }
+    job.done += 1;
+    updatePhotoProgress();
+  }
+  job.running = false;
+  job.stats = await PH.cacheStats().catch(() => null);
+  render();
+  toast(job.cancel ? `已停止：完成 ${job.done}/${job.total}` : `縮圖下載完成：${job.found} 張${job.failed ? `，${job.failed} 筆失敗` : ''}`, { duration: 5000 });
+}
+
+function updatePhotoProgress() {
+  const el = document.getElementById('photo-progress');
+  const j = state.photoJob;
+  if (el && j) el.textContent = `處理中 ${j.done}/${j.total}・找到 ${j.found} 張${j.failed ? `・失敗 ${j.failed}` : ''}`;
+}
+
+function photoSettingsCard() {
+  const pp = state.photoPrefs;
+  const j = state.photoJob;
+  const statsEl = h('p', { class: 'sub', id: 'photo-stats', text: '' });
+  if (pp.enabled) {
+    PH.cacheStats().then((st) => {
+      statsEl.textContent = `本機已保存 ${st.count} 張（約 ${(st.bytes / 1024 / 1024).toFixed(1)} MB）`;
+    }).catch(() => {});
+  }
+  return h('section', { class: 'card' },
+    h('h2', { text: '景點參考照片（選用）' }),
+    h('p', { class: 'hint', text: '從維基百科／Wikimedia Commons 取得景點照片，讓您先看看大概長什麼樣子；每張都附作者與授權。照片可能配錯，可隨時按「不是這張」。開啟後，維基百科會收到查詢的地點名稱。' }),
+    h('label', { class: 'check' },
+      h('input', { type: 'checkbox', checked: pp.enabled, on: { change: (e) => setPhotoPrefs({ enabled: e.target.checked }) } }),
+      h('span', { text: '顯示參考照片' })),
+    pp.enabled ? [
+      h('div', { class: 'btn-row' },
+        j && j.running
+          ? btn('停止下載', () => { j.cancel = true; }, 'btn danger')
+          : btn('預先下載所有旅程的照片', prefetchPhotos, 'btn primary')),
+      h('p', { class: 'sub', id: 'photo-progress', text: j && j.running ? `處理中 ${j.done}/${j.total}…` : '' }),
+      h('p', { class: 'hint', text: '建議出發前在 Wi‑Fi 下執行一次：照片會保存在手機中，之後離線或在國外都能看，不會用到國外流量。' }),
+      statsEl,
+      h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: pp.allowLive, on: { change: (e) => setPhotoPrefs({ allowLive: e.target.checked }) } }),
+        h('span', { text: '允許隨時自動下載新照片（會使用行動數據）' })),
+      h('p', { class: 'hint', text: 'iPhone 網頁 App 無法分辨 Wi‑Fi 與行動網路；關閉此項時，只會顯示已預先下載的照片。' }),
+      btn('清除已下載的照片', async () => {
+        if (!window.confirm('確定清除手機中已下載的照片？（行程資料不受影響）')) return;
+        await PH.clearCache();
+        photoUrls.forEach((u) => URL.revokeObjectURL(u));
+        photoUrls.clear();
+        render();
+      }, 'btn ghost small'),
+    ] : null);
 }
 
 async function setMapPrefs(patch) {
@@ -1428,6 +1638,8 @@ async function init() {
     state.trips = await DB.getAllTrips();
     state.lastExportAt = await DB.getMeta('lastExportAt', null);
     state.onboardingDismissed = await DB.getMeta('onboardingDismissed', false);
+    const savedPhoto = await DB.getMeta('photoPrefs', null);
+    if (savedPhoto) state.photoPrefs = { ...state.photoPrefs, ...savedPhoto };
     const savedMap = await DB.getMeta('mapPrefs', null);
     if (savedMap) state.mapPrefs = { ...state.mapPrefs, ...savedMap };
     const savedActive = await DB.getMeta('activeTripId', null);

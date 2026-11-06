@@ -23,6 +23,7 @@ js/core.js               純邏輯：資料模型、驗證、地圖網址、時�
 js/db.js                 IndexedDB 存取層（所有讀寫都經由此處）
 js/csv.js                表格轉換（CSV／Excel 共用規則）、CSV 解析（UTF-8／Big5）、AI 提示詞
 js/xlsx.js               Excel（.xlsx）讀取：不依賴外部套件，以 DecompressionStream 解壓縮
+js/photos.js             參考照片：維基百科查詢、配對、授權資訊、本機快取
 js/app.js                介面與互動
 icons/                   PWA 圖示
 data/demo-trip.json      示範旅程（僅公開景點，可公開）
@@ -36,6 +37,8 @@ tests/e2e_playwright.py  瀏覽器端對端測試（主要流程）
 tests/xlsx.test.mjs      Excel 讀取單元測試（含 Excel 自動轉日期、LibreOffice 存檔）
 tests/fixtures/          測試用 Excel 檔（虛構資料）
 tests/e2e_import.py      瀏覽器端對端測試（匯入）
+tests/photos.test.mjs    參考照片配對與查詢單元測試（模擬 API）
+tests/e2e_photos.py      參考照片端對端測試（攔截請求模擬維基百科）
 tools/bump-version.mjs   發佈新版本時一次更新所有版本字串
 tools/make-xlsx-template.py  由 CSV 範本產生 Excel 範本（需要 openpyxl）
 private/                 私人行程（已列入 .gitignore，不會上傳）
@@ -94,7 +97,16 @@ App 內的「設定 → 查看說明與 AI 提示詞」（`#guide`）有完整�
    - 單一旅程 JSON 只會自動補上**缺少的系統欄位**（id、狀態、時間戳、順序），不補任何旅遊資料；已存在但錯誤的值一律拒絕。
    - 匯入時以內容判斷 JSON 或 CSV，不依賴副檔名（iOS「檔案」有時會去掉副檔名）。
 
-## 6. 資料格式（schemaVersion 1）
+## 6. 景點參考照片（選用，預設關閉）
+
+- 來源：英文維基百科條目的代表圖片（僅自由授權，`pilicense=free`），作者與授權取自 Wikimedia Commons；每張照片都顯示作者、授權與條目連結。
+- 配對：有座標時先以地理搜尋，但**名稱也必須吻合**才採用（避免抓到隔壁建築）；否則以「當地名稱＋城市」搜尋。沒有座標且名稱不吻合時標示「自動配對，可能不是這個地點」。
+- 流量：預設關閉、不發出任何請求。開啟後，以「預先下載所有旅程的照片」在 Wi‑Fi 下一次下載，存在 Cache Storage（`tc-photos-v1`），離線可看。「允許隨時自動下載」另行開關，預設關閉（iPhone 網頁 App 無法分辨 Wi‑Fi 與行動網路）。
+- 隱私：開啟後維基百科會收到查詢的地點名稱。CSP 只開放 `en.wikipedia.org`、`commons.wikimedia.org`、`upload.wikimedia.org`。
+- 修正：照片下方「不是這張」可隱藏（可復原）；停靠點編輯頁可「重新搜尋（排除目前這張）」或移除。
+- 照片資料（條目名稱、圖片網址、授權）存於停靠點的 `photo` 欄位，會隨備份與分享範本帶出；圖片本身不在備份內，需要時可重新下載。
+
+## 7. 資料格式（schemaVersion 1）
 
 App 可匯入兩種檔案：
 
@@ -146,7 +158,7 @@ App 可匯入兩種檔案：
 
 **匯入檢查項目**：檔案大小、JSON 語法、`schemaVersion`、欄位型別、重複 ID、日期是否在旅程內、座標範圍、時間格式、網址協定、狀態與時間戳是否一致。任何一項不通過就拒絕匯入，**原資料不變**；寫入時使用單一交易。
 
-## 7. Apple Maps 連結
+## 8. Apple Maps 連結
 
 | 設定 | 網址格式 | 備註 |
 |---|---|---|
@@ -159,14 +171,14 @@ App 可匯入兩種檔案：
 - 不帶 `source`，由 Apple Maps 從目前位置規劃；不使用自動開始導航的參數。
 - 開啟地圖**不會**改變完成狀態。
 
-## 8. 資料遷移策略
+## 9. 資料遷移策略
 
 - `js/core.js` 的 `SCHEMA_VERSION` 是資料內容版本；`js/db.js` 的 `DB_VERSION` 是 IndexedDB 結構版本。
 - 讀取時一律經過 `migrateTrip()`：舊版本依序升級，只新增欄位或轉換格式，不刪除使用者資料。
 - IndexedDB 的 `onupgradeneeded` 只新增 store，不刪除。
 - 網站更新（Service Worker 換版）只更換 Cache Storage 的網站資產，不碰 IndexedDB。
 
-## 9. 隱私檢查（每次部署前）
+## 10. 隱私檢查（每次部署前）
 
 ```bash
 git status --ignored            # private/ 應顯示為 ignored
@@ -175,7 +187,7 @@ grep -ri "你的飯店名稱或其他私人關鍵字" --exclude-dir=private --ex
 
 公開 repo 與 GitHub Pages 的內容等同公開資訊。真實行程只透過 iPhone 匯入。
 
-## 10. 測試紀錄（開發端，2026-11-06）
+## 11. 測試紀錄（開發端，2026-11-06）
 
 **已自動測試**
 
@@ -185,6 +197,8 @@ grep -ri "你的飯店名稱或其他私人關鍵字" --exclude-dir=private --ex
 **v1.1.0 新增（2026-11-06）**：CSV／AI JSON 匯入。單元測試增為 27 項；匯入端對端 14 項全數通過（說明頁、複製提示詞、下載範本、貼上 AI JSON〔含 ``` 程式碼框〕、CSV 建立新旅程、Big5 解碼、日期越界拒絕、Tab 表格加入目前旅程、缺欄位拒絕）。
 
 **v1.3.0 新增（2026-11-06）**：Excel 範本與 .xlsx 匯入。單元測試 33 項（含 Excel 範本與 CSV 範本內容一致性、LibreOffice 另存檔、Excel 自動轉換日期／時間／布林、跳列、特殊字元、損壞檔）；匯入端對端 22 項全數通過。
+
+**v1.4.0 新增（2026-11-06）**：景點參考照片。單元測試 43 項（含配對：同名異城排除、相鄰建築不誤配、僅接受 upload.wikimedia.org）；照片端對端 12 項（預設不發出任何請求、預先下載、離線顯示、未允許即時下載時不連線、不是這張／復原）。開發環境無法連線真實維基百科，API 以模擬回應測試。
 
 **待 iPhone 實機驗證**（開發端無法測試，請逐項確認）
 
@@ -197,10 +211,11 @@ grep -ri "你的飯店名稱或其他私人關鍵字" --exclude-dir=private --ex
 - [ ] 系統「文字大小」調大後，按鈕是否重疊
 - [ ] 「下載 CSV 範本」在 iPhone 上能存到「檔案」，且用「檔案」選取 CSV 可匯入
 - [ ] 用電腦 Excel 填好的 .xlsx（AirDrop／iCloud 雲碟傳到手機）可直接匯入
+- [ ] 參考照片：Wi‑Fi 下預先下載成功、配對結果大致正確；飛航模式下照片仍顯示
 - [ ] Safari 分頁與主畫面 App 的資料是否分開（記錄差異）
 - [ ] 重新開機後資料是否仍在
 
-## 11. 已知限制
+## 12. 已知限制
 
 - 本 App 不做路線規劃，也不提供離線逐步導航；大眾運輸班次以 Apple Maps 與官方資訊為準。
 - iOS 仍可能清除網站資料（例如使用者清除 Safari 資料），**請定期備份**。

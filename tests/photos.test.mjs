@@ -1,0 +1,97 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as PH from '../js/photos.js';
+
+const page = (title, lat, lon, extra = {}) => ({
+  title, index: extra.index ?? 1, pageimage: `${title.replace(/ /g, '_')}.jpg`,
+  thumbnail: { source: `https://upload.wikimedia.org/thumb/${encodeURIComponent(title)}.jpg`, width: 400, height: 300 },
+  coordinates: lat == null ? undefined : [{ lat, lon }], ...extra,
+});
+
+test('名稱正規化：去除重音與括號', () => {
+  assert.equal(PH.normName('Halászbástya'), 'halaszbastya');
+  assert.equal(PH.normName('Belvedere (palace)'), 'belvedere');
+});
+
+test('配對：名稱吻合且距離近 → 高信心', () => {
+  const stop = { title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna', coordinates: { lat: 48.1982, lng: 16.3719 } };
+  const r = PH.pickBestPage([page('Wien Museum', 48.1990, 16.3720, { index: 1 }), page('Karlskirche', 48.1983, 16.3717, { index: 2 })], stop);
+  assert.equal(r.page.title, 'Karlskirche');
+  assert.equal(r.confidence, 'high');
+});
+
+test('配對：同名但在另一個城市 → 排除', () => {
+  const stop = { title: '美景宮', localName: 'Belvedere', city: 'Vienna', coordinates: { lat: 48.1916, lng: 16.3809 } };
+  assert.equal(PH.pickBestPage([page('Belvedere', 52.40, 13.05)], stop), null);
+});
+
+test('配對：沒有縮圖或非自由授權（無 pageimage）的條目不採用；已排除者略過', () => {
+  const stop = { title: 'X', localName: 'Stephansdom', city: 'Vienna' };
+  const noThumb = { title: 'Stephansdom', index: 1 };
+  assert.equal(PH.pickBestPage([noThumb], stop), null);
+  const r = PH.pickBestPage([page('Stephansdom', null, null), page('St. Stephen Cathedral', null, null, { index: 2 })], stop, { rejected: ['Stephansdom'] });
+  assert.equal(r.page.title, 'St. Stephen Cathedral');
+  assert.equal(r.confidence, 'low');
+});
+
+test('API 網址：geosearch 座標順序、origin=*、僅自由授權', () => {
+  const g = new URL(PH.geoSearchUrl({ lat: 48.2, lng: 16.37 }));
+  assert.equal(g.hostname, 'en.wikipedia.org');
+  assert.equal(g.searchParams.get('ggscoord'), '48.2|16.37');
+  assert.equal(g.searchParams.get('origin'), '*');
+  assert.equal(g.searchParams.get('pilicense'), 'free');
+  const s = new URL(PH.textSearchUrl({ title: '漁人堡', localName: 'Halászbástya', city: 'Budapest' }));
+  assert.equal(s.searchParams.get('gsrsearch'), 'Halászbástya Budapest');
+});
+
+test('只接受 upload.wikimedia.org 的 https 圖片', () => {
+  assert.equal(PH.isWikimediaUrl('https://upload.wikimedia.org/a.jpg'), true);
+  assert.equal(PH.isWikimediaUrl('http://upload.wikimedia.org/a.jpg'), false);
+  assert.equal(PH.isWikimediaUrl('https://evil.example/a.jpg'), false);
+  assert.equal(PH.isWikimediaUrl('javascript:alert(1)'), false);
+});
+
+test('不查交通類停靠點', () => {
+  assert.equal(PH.wantsPhoto({ type: 'transfer', title: '火車' }), false);
+  assert.equal(PH.wantsPhoto({ type: 'attraction', title: '美景宮' }), true);
+});
+
+function mockFetch(routes) {
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    for (const [pred, body] of routes) if (pred(url)) return { ok: true, status: 200, json: async () => body };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('lookupPhoto：座標優先；地理搜尋名稱不符時改用名稱搜尋；取得作者與授權（去除 HTML）', async () => {
+  const stop = { title: '漁人堡', localName: 'Halászbástya', city: 'Budapest', coordinates: { lat: 47.5022, lng: 19.0348 } };
+  const fetchFn = mockFetch([
+    [(u) => u.includes('generator=geosearch'), { query: { pages: [page('Matthias Church', 47.5019, 19.0342)] } }],
+    [(u) => u.includes('generator=search'), { query: { pages: [page("Fisherman's Bastion", 47.5021, 19.0349, { index: 1 })] } }],
+    [(u) => u.includes('commons.wikimedia.org'), { query: { pages: [{ imageinfo: [{
+      thumburl: 'https://upload.wikimedia.org/thumb/fb-400.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:FB.jpg',
+      extmetadata: { Artist: { value: '<a href="//x">Jane <b>Doe</b></a>' }, LicenseShortName: { value: 'CC BY-SA 4.0' }, LicenseUrl: { value: 'https://creativecommons.org/licenses/by-sa/4.0' } },
+    }] }] } }],
+  ]);
+  const p = await PH.lookupPhoto(stop, { fetchFn });
+  assert.equal(p.title, "Fisherman's Bastion");
+  assert.equal(p.artist, 'Jane Doe');
+  assert.equal(p.license, 'CC BY-SA 4.0');
+  assert.equal(p.thumbUrl, 'https://upload.wikimedia.org/thumb/fb-400.jpg');
+  assert.equal(p.hidden, false);
+  assert.ok(fetchFn.calls[0].includes('geosearch'), '先用座標查');
+});
+
+test('lookupPhoto：找不到時回傳 null；授權資訊失敗時仍保留來源', async () => {
+  const none = mockFetch([[(u) => u.includes('generator=search'), { query: {} }]]);
+  assert.equal(await PH.lookupPhoto({ title: '不存在的地方', city: 'Nowhere' }, { fetchFn: none }), null);
+  const partial = mockFetch([[(u) => u.includes('generator=search'), { query: { pages: [page('Stephansdom', null, null)] } }]]);
+  const p = await PH.lookupPhoto({ title: '聖史蒂芬大教堂', localName: 'Stephansdom', city: 'Vienna' }, { fetchFn: partial });
+  assert.equal(p.title, 'Stephansdom');
+  assert.equal(p.artist, '');
+  assert.match(p.fileUrl, /^https:\/\/commons\.wikimedia\.org\/wiki\/File:/);
+});

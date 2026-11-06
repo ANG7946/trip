@@ -336,3 +336,20 @@ code.url { display: block; font-size: 0.75rem; color: var(--muted); overflow-wra
 body.no-tabbar { padding-bottom: calc(var(--safe-bottom) + 24px); }
 body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
 .tabbar[hidden] { display: none; }
+
+/* ---------- 參考照片 ---------- */
+.next-head { display: flex; gap: 12px; align-items: flex-start; }
+.next-head .next-name { flex: 1; min-width: 0; }
+.next-head .photo.wide { flex: 1 1 100%; }
+.next-head:has(.photo.wide) { flex-wrap: wrap; }
+.photo { margin: 0 0 10px; }
+.photo-btn { display: block; padding: 0; border: 0; background: none; width: 100%; cursor: zoom-in; border-radius: 12px; overflow: hidden; }
+.photo img { display: block; width: 100%; height: 100%; object-fit: cover; background: var(--bg); }
+.photo.side { flex: 0 0 88px; width: 88px; height: 88px; margin-top: 4px; }
+.photo.side .photo-btn { height: 88px; }
+.photo.wide .photo-btn { height: auto; aspect-ratio: 4 / 3; max-height: 240px; cursor: zoom-out; }
+.card-body .photo.wide .photo-btn, fieldset .photo.wide .photo-btn { cursor: default; }
+.photo figcaption { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 6px; font-size: 0.78rem; color: var(--muted); }
+.photo-credit { flex: 1 1 200px; overflow-wrap: anywhere; }
+.photo-credit a { color: var(--muted); }
+.photo-warn { flex: 1 1 100%; color: var(--skip); font-weight: 700; font-size: 0.85rem; }
