@@ -9,6 +9,7 @@ const edits = {
   'js/app.js': [[/\?v=[\d.]+/g, `?v=${v}`], [/APP_VERSION = '[\d.]+';/, `APP_VERSION = '${v}';`]],
   'js/db.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/csv.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
+  'js/xlsx.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'package.json': [[/"version": "[\d.]+"/, `"version": "${v}"`]],
 };
 for (const [file, list] of Object.entries(edits)) {

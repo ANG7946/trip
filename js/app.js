@@ -1,9 +1,10 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.2.2';
-import * as DB from './db.js?v=1.2.2';
-import * as V from './csv.js?v=1.2.2';
+import * as C from './core.js?v=1.3.0';
+import * as DB from './db.js?v=1.3.0';
+import * as V from './csv.js?v=1.3.0';
+import * as X from './xlsx.js?v=1.3.0';
 
-export const APP_VERSION = '1.2.2';
+export const APP_VERSION = '1.3.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -776,7 +777,7 @@ function viewSettings(trip) {
 // App 設定／備份（跨所有旅程；不顯示底部分頁）
 function viewAppSettings() {
   const fileInput = h('input', {
-    type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'import-file',
+    type: 'file', accept: '.json,.csv,.xlsx,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', class: 'visually-hidden', id: 'import-file',
     on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) },
   });
   const mp = state.mapPrefs;
@@ -788,7 +789,7 @@ function viewAppSettings() {
     h('p', { class: 'hint', text: '資料只保存在這支手機的這個 App 中，可能因清除網站資料或系統清理而消失。備份是必要的保險：建議出發前一次、每天結束後一次。備份檔含私人行程，請妥善保存。' }),
     h('div', { class: 'btn-row' },
       btn('匯出完整備份', () => exportBackup(), 'btn primary', { disabled: !state.trips.length }),
-      h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
+      h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入檔案（Excel／CSV／JSON）…'),
       h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容'),
       fileInput)));
 
@@ -806,9 +807,10 @@ function viewAppSettings() {
 
   sections.push(h('section', { class: 'card' },
     h('h2', { text: '建立行程檔（自己用或分享給朋友）' }),
-    h('p', { class: 'hint', text: '除了在 App 內逐筆新增，也可以用試算表填寫 CSV 範本，或請 AI 依提示詞把行程轉成 JSON，再匯入。' }),
+    h('p', { class: 'hint', text: '除了在 App 內逐筆新增，也可以用 Excel／CSV 範本填寫，或請 AI 依提示詞把行程轉成 JSON，再匯入。' }),
     h('div', { class: 'btn-row' },
       h('a', { class: 'btn', href: '#guide' }, '查看說明與 AI 提示詞'),
+      h('a', { class: 'btn ghost', href: './data/trip-template.xlsx', download: 'trip-template.xlsx' }, '下載 Excel 範本'),
       h('a', { class: 'btn ghost', href: './data/trip-template.csv', download: 'trip-template.csv' }, '下載 CSV 範本'),
       h('a', { class: 'btn ghost', href: './data/trip-template.json', download: 'trip-template.json' }, '下載 JSON 範本'))));
 
@@ -901,8 +903,19 @@ async function handleImportFile(file, inputEl) {
       toast('檔案過大，無法匯入。', { kind: 'error' });
       return;
     }
-    // 依內容判斷格式（iOS「檔案」有時不保留副檔名）：以 { 開頭視為 JSON，其餘視為 CSV／表格
-    const { text, encoding } = V.decodeCsvBytes(await file.arrayBuffer());
+    // 依內容判斷格式（iOS「檔案」有時不保留副檔名）：ZIP 檔頭＝Excel；以 { 開頭＝JSON；其餘＝CSV／表格
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (X.isXlsxBytes(bytes)) {
+      try {
+        const { table, sheetName } = await X.readXlsx(bytes);
+        state.pendingImport = { ...V.tableToDrafts(table, { source: 'xlsx' }), kind: 'csv', encoding: `Excel（分頁：${sheetName}）`, fileName: file.name };
+      } catch (e) {
+        state.pendingImport = { ok: false, kind: 'csv', rows: [], warnings: [], errors: [`無法讀取 Excel 檔：${e.message || e}`], fileName: file.name };
+      }
+      go('#import');
+      return;
+    }
+    const { text, encoding } = V.decodeCsvBytes(bytes);
     if (text.trim().startsWith('{')) {
       state.pendingImport = { ...C.parseImport(text, file.size), fileName: file.name };
     } else {
@@ -986,8 +999,8 @@ function viewImport() {
 function viewImportCsv(pi, cancel) {
   if (!pi.ok) {
     return h('div', { class: 'view import-view' },
-      h('header', { class: 'page-header' }, h('h1', { text: '無法匯入 CSV' })),
-      h('p', { text: `檔案「${pi.fileName}」有以下問題，目前的資料完全沒有被更動。請在試算表修正後重新匯出 CSV。` }),
+      h('header', { class: 'page-header' }, h('h1', { text: '無法匯入表格' })),
+      h('p', { text: `檔案「${pi.fileName}」有以下問題，目前的資料完全沒有被更動。請在試算表修正後重新存檔再匯入。` }),
       h('div', { class: 'form-errors' }, pi.errors.slice(0, 20).map((e) => h('p', { text: e })),
         pi.errors.length > 20 ? h('p', { text: `……另有 ${pi.errors.length - 20} 項錯誤` }) : null),
       h('div', { class: 'btn-row' }, btn('返回', cancel, 'btn'), h('a', { class: 'btn ghost', href: '#guide' }, '查看欄位說明')));
@@ -1044,8 +1057,8 @@ function viewImportCsv(pi, cancel) {
   }
 
   return h('div', { class: 'view import-view' },
-    h('header', { class: 'page-header' }, h('h1', { text: '確認匯入 CSV' })),
-    h('p', { class: 'sub', text: `檔案：${pi.fileName}・編碼：${pi.encoding}` }),
+    h('header', { class: 'page-header' }, h('h1', { text: '確認匯入表格' })),
+    h('p', { class: 'sub', text: `檔案：${pi.fileName}・格式：${pi.encoding}` }),
     h('p', { text: `共 ${pi.rows.length} 筆：已排日期 ${dated.length} 筆、候選景點 ${pi.rows.length - dated.length} 筆${pi.dateRange ? `；日期 ${pi.dateRange.min}～${pi.dateRange.max}` : ''}。` }),
     pi.warnings.length ? h('div', { class: 'warn-box' }, pi.warnings.map((w) => h('p', { text: w }))) : null,
     h('ol', { class: 'plain-list preview-list' }, pi.rows.slice(0, 30).map((r) => h('li', {
@@ -1129,10 +1142,13 @@ function viewGuide() {
     h('section', { class: 'card' },
       h('h2', { text: '方式二：用試算表填寫（Excel／Numbers／Google 試算表）' }),
       h('ol', null,
-        h('li', null, '下載 CSV 範本，用試算表開啟，保留第一列欄名，照範例填寫（範例列可刪除）。'),
-        h('li', null, '另存為 CSV（Excel 請選「CSV UTF-8」；一般 CSV 也可以）。'),
-        h('li', null, '把檔案傳到手機，在首頁「我的旅程 → 匯入檔案」選取；也可以直接在試算表選取整個表格複製，到「貼上行程內容」貼上。')),
-      h('a', { class: 'btn', href: './data/trip-template.csv', download: 'trip-template.csv' }, '下載 CSV 範本'),
+        h('li', null, '下載 Excel 範本（建議）：「行程」分頁有下拉選單，「填寫說明」分頁有完整規則。照範例填寫，範例列可刪除，第一列欄名請勿修改。'),
+        h('li', null, '存檔後把 .xlsx 傳到手機，在首頁「我的旅程 → 匯入檔案」直接選取，不需要另存 CSV。'),
+        h('li', null, '使用 Google 試算表或 Numbers 者，可下載 CSV 範本，填好後匯出 CSV 再匯入；也可以選取整個表格複製，到「貼上行程內容」貼上。')),
+      h('p', { class: 'hint', text: 'Excel 與 CSV 範本的欄名與規則完全相同，兩種檔案都能匯入。' }),
+      h('div', { class: 'btn-row' },
+        h('a', { class: 'btn primary', href: './data/trip-template.xlsx', download: 'trip-template.xlsx' }, '下載 Excel 範本'),
+        h('a', { class: 'btn ghost', href: './data/trip-template.csv', download: 'trip-template.csv' }, '下載 CSV 範本')),
       h('table', { class: 'col-table' },
         h('thead', null, h('tr', null, h('th', { text: '欄位' }), h('th', { text: '填寫方式' }))),
         h('tbody', null, colRows.map(([a, b]) => h('tr', null, h('td', { text: a }), h('td', { text: b })))))),
@@ -1203,8 +1219,8 @@ function viewTrips() {
       h('h2', { text: '新增旅程' }),
       h('div', { class: 'btn-col' },
         h('a', { class: 'btn primary', href: '#tripform/new' }, '＋ 建立新旅程'),
-        h('label', { class: 'btn ghost', for: 'trips-import', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
-        h('input', { type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'trips-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
+        h('label', { class: 'btn ghost', for: 'trips-import', role: 'button', tabindex: '0' }, '匯入檔案（Excel／CSV／JSON）…'),
+        h('input', { type: 'file', accept: '.json,.csv,.xlsx,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', class: 'visually-hidden', id: 'trips-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
         h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容（例如 AI 產生的 JSON）'),
         h('a', { class: 'btn ghost', href: '#guide' }, '如何建立行程？'),
         btn('載入示範旅程', loadDemo, 'btn ghost'))),
@@ -1298,10 +1314,10 @@ function viewWelcome() {
       h('p', { class: 'sub', text: '已規劃行程的執行介面：看下一站 → 一按開啟 Apple Maps → 回來手動標記完成。' })),
     h('div', { class: 'btn-col' },
       h('a', { class: 'btn primary big', href: '#tripform/new' }, '建立新旅程'),
-      h('label', { class: 'btn big', for: 'welcome-import', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
+      h('label', { class: 'btn big', for: 'welcome-import', role: 'button', tabindex: '0' }, '匯入檔案（Excel／CSV／JSON）…'),
       h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容（例如 AI 產生的 JSON）'),
       h('a', { class: 'btn ghost', href: '#guide' }, '如何建立行程檔？'),
-      h('input', { type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'welcome-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
+      h('input', { type: 'file', accept: '.json,.csv,.xlsx,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', class: 'visually-hidden', id: 'welcome-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
       btn('先看看示範旅程', loadDemo, 'btn ghost'),
       h('a', { class: 'btn ghost', href: '#app' }, 'App 設定與導航測試')),
     h('section', { class: 'card' },

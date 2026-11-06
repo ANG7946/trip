@@ -21,18 +21,23 @@ sw.js                    Service Worker：只快取網站資產
 css/styles.css           手機直向優先、安全區域、深淺色
 js/core.js               純邏輯：資料模型、驗證、地圖網址、時區、下一站／進度（不依賴 DOM）
 js/db.js                 IndexedDB 存取層（所有讀寫都經由此處）
-js/csv.js                CSV 解析（UTF-8／Big5、中英文欄名）、範本與 AI 提示詞
+js/csv.js                表格轉換（CSV／Excel 共用規則）、CSV 解析（UTF-8／Big5）、AI 提示詞
+js/xlsx.js               Excel（.xlsx）讀取：不依賴外部套件，以 DecompressionStream 解壓縮
 js/app.js                介面與互動
 icons/                   PWA 圖示
 data/demo-trip.json      示範旅程（僅公開景點，可公開）
-data/trip-template.csv   試算表範本（僅公開景點，不含住宿與會議）
+data/trip-template.xlsx  Excel 範本：「行程」分頁（下拉選單）＋「填寫說明」分頁
+data/trip-template.csv   CSV 範本（與 Excel 範本欄名、範例完全相同）
 data/trip-template.json  JSON 範本
 data/ai-prompt.txt       給 AI 轉換行程用的提示詞
 tests/core.test.mjs      邏輯單元測試（Node 內建 test runner）
 tests/csv.test.mjs       CSV／AI JSON 匯入單元測試
 tests/e2e_playwright.py  瀏覽器端對端測試（主要流程）
+tests/xlsx.test.mjs      Excel 讀取單元測試（含 Excel 自動轉日期、LibreOffice 存檔）
+tests/fixtures/          測試用 Excel 檔（虛構資料）
 tests/e2e_import.py      瀏覽器端對端測試（匯入）
 tools/bump-version.mjs   發佈新版本時一次更新所有版本字串
+tools/make-xlsx-template.py  由 CSV 範本產生 Excel 範本（需要 openpyxl）
 private/                 私人行程（已列入 .gitignore，不會上傳）
 ```
 
@@ -76,7 +81,11 @@ Service Worker 只在 `https://` 或 `localhost` 下運作。
 App 內的「設定 → 查看說明與 AI 提示詞」（`#guide`）有完整說明，可直接把網址給朋友。
 
 1. **App 內逐筆新增**：建立新旅程 → 編輯行程 → 新增停靠點。
-2. **試算表 CSV**：下載 `trip-template.csv`，用 Excel／Numbers／Google 試算表填寫後匯出 CSV 再匯入；也可以直接複製表格，到「貼上行程內容」貼上（Tab 分隔）。
+2. **試算表（Excel 或 CSV）**：
+   - **Excel 範本（建議）**：`trip-template.xlsx`。「行程」分頁的類型、交通方式、已確認地點都有下拉選單，日期、時間、座標欄預設為文字格式；「填寫說明」分頁附完整規則。存檔後直接匯入 .xlsx，不需要另存 CSV。App 優先讀取名為「行程」的分頁。
+   - **CSV 範本**：`trip-template.csv`，給 Google 試算表、Numbers 使用者。也可以直接複製表格，到「貼上行程內容」貼上（Tab 分隔）。
+   - 兩種範本欄名與規則完全相同，經過同一套檢查。修改範本時，請先改 `js/csv.js` 的 `TEMPLATE_ROWS` 並重新產生 CSV，再執行 `python3 tools/make-xlsx-template.py data/trip-template.csv data/trip-template.xlsx`。
+   - Excel 若把日期、時間自動轉成序號，App 會換算回 `YYYY-MM-DD`、`HH:mm`。
    - 欄名支援中文或英文：日期、順序、城市、名稱、當地名稱、類型、開始時間、結束時間、地址、座標、入口座標、交通方式、已確認地點、參考網址、備註。
    - 編碼自動判斷：UTF-8（含 BOM）或 Big5（Windows 繁中 Excel 的一般 CSV）。
    - 日期接受 `2026-11-12`、`2026/11/12`；時間接受 `9:00`、`09:00:00`；類型與交通方式接受中文。
@@ -175,6 +184,8 @@ grep -ri "你的飯店名稱或其他私人關鍵字" --exclude-dir=private --ex
 
 **v1.1.0 新增（2026-11-06）**：CSV／AI JSON 匯入。單元測試增為 27 項；匯入端對端 14 項全數通過（說明頁、複製提示詞、下載範本、貼上 AI JSON〔含 ``` 程式碼框〕、CSV 建立新旅程、Big5 解碼、日期越界拒絕、Tab 表格加入目前旅程、缺欄位拒絕）。
 
+**v1.3.0 新增（2026-11-06）**：Excel 範本與 .xlsx 匯入。單元測試 33 項（含 Excel 範本與 CSV 範本內容一致性、LibreOffice 另存檔、Excel 自動轉換日期／時間／布林、跳列、特殊字元、損壞檔）；匯入端對端 22 項全數通過。
+
 **待 iPhone 實機驗證**（開發端無法測試，請逐項確認）
 
 - [ ] 主畫面 App 點導航按鈕，是否**直接跳到 Apple Maps**（可在「設定 → 導航測試」比較四種格式）
@@ -185,6 +196,7 @@ grep -ri "你的飯店名稱或其他私人關鍵字" --exclude-dir=private --ex
 - [ ] 匯出時分享面板是否出現「儲存到檔案」，以及存檔後能否重新匯入
 - [ ] 系統「文字大小」調大後，按鈕是否重疊
 - [ ] 「下載 CSV 範本」在 iPhone 上能存到「檔案」，且用「檔案」選取 CSV 可匯入
+- [ ] 用電腦 Excel 填好的 .xlsx（AirDrop／iCloud 雲碟傳到手機）可直接匯入
 - [ ] Safari 分頁與主畫面 App 的資料是否分開（記錄差異）
 - [ ] 重新開機後資料是否仍在
 
@@ -194,7 +206,8 @@ grep -ri "你的飯店名稱或其他私人關鍵字" --exclude-dir=private --ex
 - iOS 仍可能清除網站資料（例如使用者清除 Safari 資料），**請定期備份**。
 - 匯入只支援「整份取代」或「加入／取代單一旅程」，合併同步列為 P1。
 - Google Maps 清單整理（F15）尚未實作；目前可先把清單整理成 CSV 或交給 AI 轉換。
-- 不支援直接匯入 .xlsx，請另存為 CSV。
+- Excel 只讀取儲存格的值，不計算公式；含公式的儲存格以 Excel 最後存檔時的結果為準。不支援舊版 .xls。
+- 讀取 .xlsx 需要瀏覽器支援 DecompressionStream（iOS Safari 16.4 以上）。
 
 ## 授權
 

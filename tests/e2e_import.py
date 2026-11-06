@@ -108,11 +108,42 @@ async def main():
         open(bad, 'w', encoding='utf-8').write('日期,地址\n2026-11-12,x\n')
         await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
         await page.set_input_files('#import-file', bad); await page.wait_for_selector('.import-view')
-        check('缺名稱欄的 CSV 被拒', '無法匯入 CSV' in await page.inner_text('.import-view h1'))
+        check('缺名稱欄的 CSV 被拒', '無法匯入表格' in await page.inner_text('.import-view h1'))
+
+        # Excel 範本：下載 → 匯入為新旅程
+        await page.goto(BASE + '#guide'); await page.wait_for_selector('.guide-view')
+        async with page.expect_download() as dl3:
+            await page.click('.guide-view a:has-text("下載 Excel 範本")')
+        x = await dl3.value
+        xpath = await x.path()
+        check('下載 Excel 範本（ZIP 檔頭）', x.suggested_filename == 'trip-template.xlsx' and open(xpath, 'rb').read(4) == b'PK\x03\x04')
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
+        await page.set_input_files('#import-file', xpath); await page.wait_for_selector('.import-view')
+        txt = await page.inner_text('.import-view')
+        check('Excel 預覽（讀取「行程」分頁）', '分頁：行程' in txt and '共 5 筆' in txt, txt[:100])
+        await page.fill('.import-view input[type=text]', 'Excel 測試旅程')
+        await page.click('text=建立新旅程並匯入'); await page.wait_for_selector('.today-view')
+        check('Excel 新旅程下一站', '卡爾教堂' in await page.inner_text('.next-name'))
+
+        # Excel 自動轉換的日期／時間
+        fx = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'excel-auto-converted.xlsx')
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
+        await page.set_input_files('#import-file', fx); await page.wait_for_selector('.import-view')
+        await page.click('button:has-text("加入「Excel 測試旅程」")'); await page.wait_for_selector('.edit-view')
+        await page.goto(BASE + '#today'); await page.wait_for_selector('.today-view')
+        meta = await page.inner_text('.today-view')
+        check('Excel 日期序號與時間正確換算', '09:30–15:00' in meta and 'A & B <測試>' in meta, '')
+
+        # 壞掉的 Excel
+        bx = os.path.join(tempfile.gettempdir(), 'broken.xlsx')
+        open(bx, 'wb').write(open(xpath, 'rb').read()[:3000])
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
+        await page.set_input_files('#import-file', bx); await page.wait_for_selector('.import-view')
+        check('損壞的 Excel 顯示錯誤', '無法讀取 Excel 檔' in await page.inner_text('.import-view'))
 
         # 旅程數
         await page.goto(BASE + '#trips'); await page.wait_for_selector('.date-list')
-        check('共有 2 個旅程', await page.locator('.date-list li').count() == 2)
+        check('共有 3 個旅程', await page.locator('.date-list li').count() == 3)
         check('無 JS 錯誤', not errors, '; '.join(errors))
         await b.close()
     fails = [r for r in results if not r[1]]

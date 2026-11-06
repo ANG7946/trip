@@ -1,5 +1,6 @@
 // csv.js — CSV（Excel／Numbers／Google 試算表）匯入與範本
-import * as C from './core.js?v=1.2.2';
+import * as C from './core.js?v=1.3.0';
+import { excelSerialToDate, excelFractionToTime } from './xlsx.js?v=1.3.0';
 
 // 欄位定義：key、範本欄名（中文）、可接受的別名
 export const CSV_COLUMNS = [
@@ -125,9 +126,18 @@ export function normalizeTime(s) {
  * 草稿尚未指定 order（同日依檔案順序或「順序」欄）。
  */
 export function csvToDrafts(text) {
+  return tableToDrafts(parseCsvText(text));
+}
+
+const NUMERIC_RE = /^\d+(?:\.\d+)?$/;
+
+/**
+ * 共用的表格轉換（CSV 與 Excel 都經過這裡，規則完全相同）。
+ * source: 'csv' | 'xlsx'。Excel 會把日期、時間存成序號，僅在 xlsx 來源時換算。
+ */
+export function tableToDrafts(table, { source = 'csv' } = {}) {
   const errors = [];
   const warnings = [];
-  const table = parseCsvText(text);
   if (!table.length) return { ok: false, rows: [], errors: ['檔案是空的'], warnings, dateRange: null, columns: [] };
 
   const header = table[0].map((h) => norm(h));
@@ -144,7 +154,15 @@ export function csvToDrafts(text) {
   }
   if (unknown.length) warnings.push(`以下欄位無法辨識，已忽略：${unknown.join('、')}`);
 
-  const get = (r, key) => (colIndex[key] === undefined ? '' : String(r[colIndex[key]] ?? '').trim());
+  const raw = (r, key) => (colIndex[key] === undefined ? '' : String(r[colIndex[key]] ?? '').trim());
+  const get = (r, key) => {
+    const v = raw(r, key);
+    if (source === 'xlsx' && NUMERIC_RE.test(v)) {
+      if (key === 'date') return excelSerialToDate(v) || v;
+      if (key === 'startTime' || key === 'endTime') return Number(v) < 1 ? (excelFractionToTime(v) || v) : v;
+    }
+    return v;
+  };
   const rows = [];
   let min = null;
   let max = null;
