@@ -2,8 +2,10 @@
 // 原則：預設關閉；只有使用者開啟後才發出網路請求；圖片存在本機快取，離線可看；一律附上作者與授權。
 
 export const PHOTO_CACHE = 'tc-photos-v1';
-export const THUMB_WIDTH = 400;
-const WIKI_API = 'https://en.wikipedia.org/w/api.php';
+// 使用維基媒體的標準縮圖寬度；非標準尺寸常需現場產生，容易被限流（HTTP 429）
+export const THUMB_WIDTH = 330;
+export const THUMB_FALLBACK_WIDTH = 250;
+const wikiApi = (lang) => `https://${lang}.wikipedia.org/w/api.php`;
 const COMMONS_API = 'https://commons.wikimedia.org/w/api.php';
 
 /** 不查縮圖的停靠點類型（交通移動通常沒有可辨識的「長相」） */
@@ -83,15 +85,33 @@ const COMMON_PARAMS = {
 };
 
 export function geoSearchUrl(coords) {
-  const u = new URL(WIKI_API);
+  const u = new URL(wikiApi('en'));
   Object.entries({ ...COMMON_PARAMS, generator: 'geosearch', ggscoord: `${coords.lat}|${coords.lng}`, ggsradius: '500', ggslimit: '10' })
     .forEach(([k, v]) => u.searchParams.set(k, v));
   return u.toString();
 }
 
-export function textSearchUrl(stop) {
-  const q = [stop.localName || stop.title, stop.city].filter(Boolean).join(' ');
-  const u = new URL(WIKI_API);
+const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
+
+/**
+ * 名稱搜尋的嘗試順序（由精確到寬鬆）：
+ *  1. 英文維基：當地名稱＋城市　2. 英文維基：當地名稱　3. 中文維基：中文名稱（＋城市）
+ */
+export function searchPlans(stop) {
+  const plans = [];
+  const local = (stop.localName || '').trim();
+  const title = (stop.title || '').trim();
+  const city = (stop.city || '').trim();
+  const add = (lang, q) => { if (q && !plans.some((x) => x.lang === lang && x.q === q)) plans.push({ lang, q }); };
+  if (local) { add('en', [local, city].filter(Boolean).join(' ')); add('en', local); }
+  if (title && !CJK_RE.test(title)) { add('en', [title, city].filter(Boolean).join(' ')); add('en', title); }
+  if (title && CJK_RE.test(title)) add('zh', title);
+  return plans;
+}
+
+export function textSearchUrl(stop, plan) {
+  const { lang, q } = plan || searchPlans(stop)[0] || { lang: 'en', q: stop.title };
+  const u = new URL(wikiApi(lang));
   Object.entries({ ...COMMON_PARAMS, generator: 'search', gsrsearch: q, gsrlimit: '5' })
     .forEach(([k, v]) => u.searchParams.set(k, v));
   return u.toString();
@@ -143,9 +163,13 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
     // 地理搜尋必須名稱也吻合才採用；否則改用名稱搜尋，避免抓到隔壁建築（例如漁人堡旁的馬加什教堂）
     if (candidate && candidate.nameMatch) pick = candidate;
   }
+  let lang = 'en';
   if (!pick) {
-    const txt = await getJson(fetchFn, textSearchUrl(stop));
-    pick = pickBestPage(txt?.query?.pages, stop, { rejected });
+    for (const plan of searchPlans(stop)) {
+      const txt = await getJson(fetchFn, textSearchUrl(stop, plan));
+      const cand = pickBestPage(txt?.query?.pages, stop, { rejected });
+      if (cand) { pick = cand; lang = plan.lang; break; }
+    }
   }
   if (!pick) return null;
 
@@ -171,7 +195,8 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
   return {
     source: 'wikipedia',
     title: page.title,
-    pageUrl: `https://en.wikipedia.org/wiki/${encodeURIComponent(page.title.replace(/ /g, '_'))}`,
+    pageUrl: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(page.title.replace(/ /g, '_'))}`,
+    lang,
     fileUrl,
     thumbUrl,
     width: page.thumbnail.width || null,
@@ -202,13 +227,39 @@ export async function cachedBlob(url) {
   return res ? res.blob() : null;
 }
 
-export async function downloadToCache(url, fetchFn = fetch) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 把縮圖網址中的寬度（.../330px-File.jpg）換成另一個標準寬度 */
+export function withThumbWidth(url, width) {
+  return url.replace(/\/(\d+)px-([^/]+)$/, `/${width}px-$2`);
+}
+
+/**
+ * 下載圖片並存入本機快取（以原始網址為鍵）。
+ * 遇到 429／5xx 稍候重試一次；仍失敗則改用較小的標準寬度再試。
+ */
+export async function downloadToCache(url, fetchFn = fetch, { wait = sleep } = {}) {
   if (!isWikimediaUrl(url)) throw new Error('不允許的圖片來源');
-  const res = await fetchFn(url, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const cache = await caches.open(PHOTO_CACHE);
-  await cache.put(url, res.clone());
-  return res.blob();
+  const opts = { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer' };
+  const attempts = [url, url, withThumbWidth(url, THUMB_FALLBACK_WIDTH)].filter((u, i, a) => i < 2 || u !== a[0]);
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      const res = await fetchFn(attempts[i], opts);
+      if (res.ok) {
+        const cache = await caches.open(PHOTO_CACHE);
+        await cache.put(url, res.clone());
+        return res.blob();
+      }
+      lastErr = new Error(`HTTP ${res.status}`);
+      if (res.status === 404) break;
+      if (res.status === 429 || res.status >= 500) await wait(1500 * (i + 1));
+    } catch (e) {
+      lastErr = new Error(e && e.message ? e.message : '網路錯誤');
+      await wait(800);
+    }
+  }
+  throw lastErr || new Error('下載失敗');
 }
 
 export async function cacheStats() {

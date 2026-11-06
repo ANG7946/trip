@@ -4,7 +4,9 @@
 export const SCHEMA_VERSION = 1;
 export const BACKUP_FORMAT = 'travel-companion-backup';
 export const TEMPLATE_FORMAT = 'travel-companion-trip';
-export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+export const MAX_IMPORT_BYTES = 60 * 1024 * 1024; // 含照片的備份可能數 MB 至數十 MB
+export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+export const MAX_IMAGE_BASE64 = 3 * 1024 * 1024; // 單張上限（縮圖後通常 < 100 KB）
 
 export const STATUSES = ['pending', 'completed', 'skipped'];
 export const MODES = ['walking', 'transit', 'driving', 'cycling'];
@@ -494,6 +496,7 @@ export function validateTrip(trip, label = '旅程') {
     if (s.status === 'skipped' && !s.skippedAt) e('已略過但缺少 skippedAt');
     if (s.status !== 'skipped' && s.skippedAt) e('非略過狀態卻有 skippedAt');
     if (typeof s.updatedAt !== 'string') e('缺少 updatedAt');
+    if (s.userPhoto !== undefined && s.userPhoto !== null && !(typeOf(s.userPhoto) === 'object' && typeof s.userPhoto.id === 'string' && s.userPhoto.id)) e('userPhoto 格式錯誤');
   });
   return errors;
 }
@@ -531,6 +534,10 @@ export function parseImport(text, byteLength = text ? text.length : 0) {
   }
 
   const errors = [];
+  let images = null;
+  if (kind === 'backup' && data.images !== undefined) {
+    images = validateImages(data.images, errors);
+  }
   const tripIds = new Set();
   trips.forEach((t, i) => {
     errors.push(...validateTrip(t, trips.length > 1 ? `旅程 ${i + 1}` : '旅程'));
@@ -552,7 +559,7 @@ export function parseImport(text, byteLength = text ? text.length : 0) {
   });
   // 回傳深拷貝並補齊選填設定的預設值
   const clean = trips.map((t) => fillDefaults(JSON.parse(JSON.stringify(t))));
-  return { ok: true, kind, trips: clean, errors: [], summary, exportedAt: data.exportedAt || null };
+  return { ok: true, kind, trips: clean, images, errors: [], summary, exportedAt: data.exportedAt || null };
 }
 
 /**
@@ -595,6 +602,26 @@ export function normalizeIncomingTrip(data) {
   return t;
 }
 
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** 驗證備份中的照片；回傳乾淨的照片陣列（錯誤寫入 errors）。 */
+export function validateImages(list, errors) {
+  if (!Array.isArray(list)) { errors.push('備份的 images 必須是陣列'); return null; }
+  const ids = new Set();
+  const out = [];
+  list.forEach((im, i) => {
+    const e = (m) => errors.push(`第 ${i + 1} 張照片：${m}`);
+    if (typeOf(im) !== 'object') return e('格式錯誤');
+    if (typeof im.id !== 'string' || !im.id) return e('缺少 id');
+    if (ids.has(im.id)) return e(`id 重複：${im.id}`);
+    ids.add(im.id);
+    if (!IMAGE_MIMES.includes(im.mime)) return e(`不支援的格式：${JSON.stringify(im.mime)}`);
+    if (typeof im.data !== 'string' || !im.data || im.data.length > MAX_IMAGE_BASE64 || !BASE64_RE.test(im.data)) return e('照片內容損壞或過大');
+    out.push({ id: im.id, mime: im.mime, data: im.data, width: Number(im.width) || null, height: Number(im.height) || null, createdAt: typeof im.createdAt === 'string' ? im.createdAt : nowIso() });
+  });
+  return out;
+}
+
 /** 補齊選填欄位（不改動任何已存在的值）。 */
 export function fillDefaults(trip) {
   trip.settings = {
@@ -613,14 +640,25 @@ export function fillDefaults(trip) {
 
 // ---------- 匯出 ----------
 
-export function buildBackup(trips, at = nowIso()) {
-  return {
+/** images 為 null 表示「不含照片」的備份（還原時保留手機中既有照片）。 */
+export function buildBackup(trips, at = nowIso(), images = null) {
+  const b = {
     format: BACKUP_FORMAT,
     schemaVersion: SCHEMA_VERSION,
     exportedAt: at,
     app: 'Travel Companion',
     trips,
   };
+  if (images) {
+    const used = new Set(trips.flatMap((t) => t.stops.map((s) => s.userPhoto && s.userPhoto.id).filter(Boolean)));
+    b.images = images.filter((im) => used.has(im.id));
+  }
+  return b;
+}
+
+/** 所有旅程中仍被引用的照片 id */
+export function referencedImageIds(trips) {
+  return new Set(trips.flatMap((t) => t.stops.map((s) => s.userPhoto && s.userPhoto.id).filter(Boolean)));
 }
 
 /** 分享用範本：移除完成狀態、時間戳與備註，產生新的 tripId 與停靠點 id。 */
@@ -642,6 +680,7 @@ export function buildTemplate(trip, { keepNotes = false } = {}) {
       completedAt: null,
       skippedAt: null,
       notes: keepNotes ? s.notes : null,
+      userPhoto: null, // 自己的照片不放進分享範本（可能有版權或私人內容）
       updatedAt: ts,
     })),
     createdAt: ts,

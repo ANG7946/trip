@@ -95,3 +95,45 @@ test('lookupPhoto：找不到時回傳 null；授權資訊失敗時仍保留來�
   assert.equal(p.artist, '');
   assert.match(p.fileUrl, /^https:\/\/commons\.wikimedia\.org\/wiki\/File:/);
 });
+
+test('搜尋順序：當地名稱＋城市 → 當地名稱 → 中文維基（中文名稱）', () => {
+  const plans = PH.searchPlans({ title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna' });
+  assert.deepEqual(plans, [{ lang: 'en', q: 'Karlskirche Vienna' }, { lang: 'en', q: 'Karlskirche' }, { lang: 'zh', q: '卡爾教堂' }]);
+  assert.deepEqual(PH.searchPlans({ title: 'Café Sacher', city: 'Vienna' }), [{ lang: 'en', q: 'Café Sacher Vienna' }, { lang: 'en', q: 'Café Sacher' }]);
+  assert.equal(new URL(PH.textSearchUrl({}, { lang: 'zh', q: '漁人堡' })).hostname, 'zh.wikipedia.org');
+});
+
+test('英文找不到時改查中文維基百科，條目連結指向中文維基', async () => {
+  const fetchFn = mockFetch([
+    [(u) => u.includes('zh.wikipedia.org') && u.includes('generator=search'), { query: { pages: [page('卡爾教堂', null, null)] } }],
+    [(u) => u.includes('en.wikipedia.org'), { query: {} }],
+  ]);
+  const p = await PH.lookupPhoto({ title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna' }, { fetchFn });
+  assert.equal(p.title, '卡爾教堂');
+  assert.equal(p.lang, 'zh');
+  assert.match(p.pageUrl, /^https:\/\/zh\.wikipedia\.org\/wiki\//);
+  assert.equal(p.confidence, 'medium', '中文名稱完全吻合');
+});
+
+test('縮圖使用標準寬度 330；網址寬度替換', () => {
+  assert.equal(PH.THUMB_WIDTH, 330);
+  assert.equal(new URL(PH.geoSearchUrl({ lat: 1, lng: 2 })).searchParams.get('pithumbsize'), '330');
+  assert.equal(PH.withThumbWidth('https://upload.wikimedia.org/a/ab/X.jpg/330px-X.jpg', 250), 'https://upload.wikimedia.org/a/ab/X.jpg/250px-X.jpg');
+});
+
+test('下載：429 時稍候重試，仍失敗改用 250px；404 不重試', async () => {
+  const store = new Map();
+  globalThis.caches = { open: async () => ({ put: async (k, v) => store.set(k, v), match: async (k) => store.get(k) }) };
+  const url = 'https://upload.wikimedia.org/a/ab/X.jpg/330px-X.jpg';
+  const seen = [];
+  const okRes = { ok: true, status: 200, clone() { return this; }, blob: async () => ({ size: 10 }) };
+  const f = async (u) => { seen.push(u); return u.includes('/250px-') ? okRes : { ok: false, status: 429 }; };
+  const blob = await PH.downloadToCache(url, f, { wait: async () => {} });
+  assert.equal(blob.size, 10);
+  assert.deepEqual(seen, [url, url, url.replace('/330px-', '/250px-')]);
+  assert.ok(store.has(url), '以原網址為鍵存入快取');
+  const seen404 = [];
+  await assert.rejects(() => PH.downloadToCache(url, async (u) => { seen404.push(u); return { ok: false, status: 404 }; }, { wait: async () => {} }), /HTTP 404/);
+  assert.equal(seen404.length, 1);
+  delete globalThis.caches;
+});

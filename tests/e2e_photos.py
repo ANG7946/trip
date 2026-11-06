@@ -38,6 +38,19 @@ async def route_wiki(route):
     q = (qs.get('gsrsearch') or [''])[0]
     return await route.fulfill(status=200, body=json.dumps(page_for(q)), headers={**headers, 'Content-Type': 'application/json'})
 
+async def wait_true(page, expr, timeout=10000):
+    """輪詢 page.evaluate（不使用 eval，App 的 CSP 保持嚴格）"""
+    import time
+    end = time.time() + timeout / 1000
+    while time.time() < end:
+        try:
+            if await page.evaluate(expr):
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.1)
+    raise TimeoutError(f'等待逾時：{expr[:60]}')
+
 async def main():
     async with async_playwright() as p:
         kw = {'args': ['--no-sandbox']}
@@ -51,7 +64,7 @@ async def main():
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('dialog', lambda d: asyncio.ensure_future(d.accept()))
         await page.goto(BASE); await page.wait_for_selector('.welcome')
-        await page.wait_for_function('navigator.serviceWorker && navigator.serviceWorker.controller !== null', timeout=10000)
+        await wait_true(page, 'navigator.serviceWorker && navigator.serviceWorker.controller !== null', timeout=10000)
         await page.click('text=先看看示範旅程'); await page.wait_for_selector('.next-card')
         for s in ['.tab:has-text("全部日期")', '.tab:has-text("編輯行程")', '.tab:has-text("今天")']:
             await page.click(s); await page.wait_for_timeout(200)
@@ -64,9 +77,11 @@ async def main():
         await page.wait_for_selector('text=預先下載所有旅程的照片')
         check('只開啟顯示、尚未下載：仍沒有請求', len(wiki_hits) == 0)
         await page.click('text=預先下載所有旅程的照片')
-        await page.wait_for_selector('.toast.show:has-text("縮圖下載完成")', timeout=20000)
+        await page.wait_for_selector('.toast.show:has-text("完成：找到")', timeout=30000)
         toast = await page.inner_text('.toast')
-        check('預先下載完成', '縮圖下載完成' in toast, toast.replace('\n', ' '))
+        check('預先下載完成並回報找到／找不到', '找到 6 張' in toast and '找不到 1 筆' in toast, toast.replace('\n', ' '))
+        report = await page.inner_text('.job-report')
+        check('設定頁顯示逐筆明細', '找不到條目' in report and '成功（6）' in report, report.replace('\n', ' ')[:120])
         await page.wait_for_timeout(500)
         stats = await page.inner_text('#photo-stats')
         check('本機已保存照片', '已保存' in stats and '已保存 0 張' not in stats, stats)
@@ -74,7 +89,7 @@ async def main():
 
         # 今天頁顯示側邊縮圖，點擊放大並顯示授權
         await page.goto(BASE + '#today'); await page.wait_for_selector('.next-card')
-        await page.wait_for_function("document.querySelector('.next-card .photo img') && document.querySelector('.next-card .photo img').src.startsWith('blob:')", timeout=5000)
+        await wait_true(page, "document.querySelector('.next-card .photo img') && document.querySelector('.next-card .photo img').src.startsWith('blob:')", timeout=5000)
         w = await page.evaluate("new Promise(r => { const i = document.querySelector('.next-card .photo img'); if (i.complete) r(i.naturalWidth); else i.onload = () => r(i.naturalWidth); })")
         check('下一站顯示照片（來自本機快取，且圖片可解碼）', w == 400, str(w))
         await page.screenshot(path=f'{SHOTS}/21-photo-side.png')
@@ -87,7 +102,7 @@ async def main():
         n_before = len(wiki_hits)
         await ctx.set_offline(True)
         await page.reload(); await page.wait_for_selector('.next-card')
-        await page.wait_for_function("document.querySelector('.next-card .photo img') && document.querySelector('.next-card .photo img').src.startsWith('blob:')", timeout=5000)
+        await wait_true(page, "document.querySelector('.next-card .photo img') && document.querySelector('.next-card .photo img').src.startsWith('blob:')", timeout=5000)
         check('離線時照片仍可顯示', True)
         await ctx.set_offline(False)
         await page.reload(); await page.wait_for_selector('.next-card'); await page.wait_for_timeout(800)

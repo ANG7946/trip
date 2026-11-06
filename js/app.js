@@ -1,11 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.4.0';
-import * as DB from './db.js?v=1.4.0';
-import * as V from './csv.js?v=1.4.0';
-import * as X from './xlsx.js?v=1.4.0';
-import * as PH from './photos.js?v=1.4.0';
+import * as C from './core.js?v=1.5.0';
+import * as DB from './db.js?v=1.5.0';
+import * as V from './csv.js?v=1.5.0';
+import * as X from './xlsx.js?v=1.5.0';
+import * as PH from './photos.js?v=1.5.0';
+import * as IM from './images.js?v=1.5.0';
 
-export const APP_VERSION = '1.4.0';
+export const APP_VERSION = '1.5.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -26,6 +27,8 @@ const state = {
   mapPrefs: { provider: 'apple', appleStyle: 'unified' }, // 本機設定，所有旅程共用
   photoPrefs: { enabled: false, allowLive: false },       // 縮圖：預設關閉；即時下載另行開啟
   photoJob: null,                                          // 預先下載進度
+  images: new Map(),                                       // 自己的照片：id → { mime, data(base64), … }
+  pendingPhotos: null,                                     // 批次指派預覽
 };
 
 const main = () => document.getElementById('main');
@@ -110,7 +113,11 @@ async function commitTrip(newTrip, { rerender = true } = {}) {
   }
   const idx = state.trips.findIndex((x) => x.tripId === t.tripId);
   if (idx >= 0) state.trips[idx] = t; else state.trips.push(t);
-  if (rerender) render();
+  if (rerender) {
+    // 編輯表單開啟中：只更新照片區塊，避免清掉尚未儲存的欄位
+    if (['stop', 'new'].includes(state.route.name)) refreshFormPhoto();
+    else render();
+  }
   return true;
 }
 
@@ -194,6 +201,8 @@ function render() {
       case 'maptest': view = viewMapTest(trip); break;
       case 'guide': view = viewGuide(); break;
       case 'app': view = viewAppSettings(); break;
+      case 'photos': view = viewPhotos(trip); break;
+      case 'photoassign': view = viewPhotoAssign(trip); break;
       case 'paste': view = viewPaste(); break;
       default: view = viewToday(trip);
     }
@@ -228,14 +237,14 @@ function renderTabBar() {
   ];
   const nav = document.getElementById('tabbar');
   // 分頁都是針對「目前旅程」；在旅程列表或尚無旅程時隱藏，避免誤入上次使用的旅程
-  const standalonePages = ['trips', 'app', 'guide', 'paste', 'import', 'maptest'];
+  const standalonePages = ['trips', 'app', 'guide', 'paste', 'import', 'maptest', 'photoassign'];
   const hide = standalonePages.includes(r) || (r === 'tripform' && state.route.arg === 'new') || !activeTrip();
   nav.hidden = hide;
   document.body.classList.toggle('no-tabbar', hide);
   if (hide) { nav.replaceChildren(); return; }
   nav.replaceChildren(...tabs.map(([name, label, href]) => {
     const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
-      || (name === 'settings' && r === 'tripform');
+      || (name === 'settings' && (r === 'tripform' || r === 'photos'));
     return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
   }));
 }
@@ -448,7 +457,24 @@ async function liveLookup(stopId) {
   } catch { /* 查詢失敗不影響行程操作 */ }
 }
 
+function userPhotoOf(stop) {
+  return stop && stop.userPhoto ? state.images.get(stop.userPhoto.id) || null : null;
+}
+
+function userPhotoBlock(stop, variant) {
+  const rec = userPhotoOf(stop);
+  const big = variant === 'wide' || expandedPhotos.has(stop.id);
+  return h('figure', { class: `photo ${big ? 'wide' : 'side'}` },
+    h('button', {
+      type: 'button', class: 'photo-btn', 'aria-label': big ? '縮小照片' : '放大照片',
+      on: { click: () => { if (variant === 'side') { if (expandedPhotos.has(stop.id)) expandedPhotos.delete(stop.id); else expandedPhotos.add(stop.id); render(); } } },
+    }, h('img', { alt: `${stop.title}（我的照片）`, src: IM.dataUrl(rec), decoding: 'async' })),
+    big ? h('figcaption', null, h('span', { class: 'photo-credit', text: '我的照片' })) : null);
+}
+
 function photoBlock(stop, { variant = 'wide' } = {}) {
+  // 自己的照片優先顯示，且不受維基百科照片開關影響（完全本機、不連網）
+  if (userPhotoOf(stop)) return userPhotoBlock(stop, variant);
   if (!state.photoPrefs.enabled || !PH.wantsPhoto(stop)) return null;
   const ph = stop.photo;
   if (!ph) {
@@ -476,6 +502,62 @@ function photoBlock(stop, { variant = 'wide' } = {}) {
       btn('不是這張', () => rejectPhoto(stop.id), 'btn ghost small')) : null);
   fillPhoto(img, fig, ph.thumbUrl);
   return fig;
+}
+
+/** 以使用者點擊開啟檔案選擇器（iOS 會提供「照片圖庫／拍照／選擇檔案」） */
+function pickImages({ multiple = false } = {}, onFiles) {
+  const input = h('input', { type: 'file', accept: 'image/*', class: 'visually-hidden' });
+  if (multiple) input.multiple = true;
+  input.addEventListener('change', () => {
+    const files = [...(input.files || [])];
+    input.remove();
+    if (files.length) onFiles(files);
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+async function saveUserPhoto(stopId, file) {
+  let rec;
+  try {
+    const r = await IM.resizeToJpeg(file);
+    rec = { id: C.uuid(), ...r, createdAt: C.nowIso() };
+    await DB.putImages([rec]);
+  } catch (e) {
+    toast(`照片處理失敗：${e.message || e}`, { kind: 'error' });
+    return false;
+  }
+  state.images.set(rec.id, rec);
+  const trip = activeTrip();
+  const before = trip.stops.find((x) => x.id === stopId);
+  const ok = await updateStop(stopId, (x) => ({ ...x, userPhoto: { id: rec.id, addedAt: rec.createdAt } }));
+  if (ok) {
+    toast(`已加入照片（約 ${Math.round(rec.bytes / 1024)} KB）`, {
+      duration: 4000,
+      actionLabel: before && before.userPhoto ? '復原' : null,
+      action: before && before.userPhoto ? () => updateStop(stopId, (x) => ({ ...x, userPhoto: before.userPhoto })) : null,
+    });
+  }
+  return ok;
+}
+
+async function removeUserPhoto(stopId) {
+  const trip = activeTrip();
+  const before = trip.stops.find((x) => x.id === stopId);
+  if (!before || !before.userPhoto) return;
+  const ok = await updateStop(stopId, (x) => ({ ...x, userPhoto: null }));
+  if (ok) toast('已移除我的照片', { actionLabel: '復原', action: () => updateStop(stopId, (x) => ({ ...x, userPhoto: before.userPhoto })) });
+}
+
+/** 刪除不再被任何停靠點引用的照片（啟動時與刪除旅程後執行） */
+async function gcImages() {
+  const used = C.referencedImageIds(state.trips);
+  const orphans = [...state.images.keys()].filter((id) => !used.has(id));
+  if (!orphans.length) return;
+  try {
+    await DB.deleteImages(orphans);
+    orphans.forEach((id) => state.images.delete(id));
+  } catch { /* 下次再清 */ }
 }
 
 async function rejectPhoto(stopId) {
@@ -617,6 +699,8 @@ function viewEditDay(trip) {
   const stops = C.stopsForDate(trip, state.viewDate);
   const cands = C.candidates(trip);
   const wrap = h('div', { class: 'view edit-view' }, dayHeader(trip, { title: `編輯行程・${trip.title}` }));
+  wrap.appendChild(h('div', { class: 'btn-row edit-top' },
+    h('a', { class: 'btn ghost small', href: '#photos' }, '照片整理')));
   wrap.appendChild(h('p', { class: 'hint', text: '用「上移／下移」調整順序；下一站依此順序決定，不會依時間自動重排。' }));
 
   if (!stops.length) wrap.appendChild(h('p', { class: 'empty-line', text: '這一天沒有停靠點。' }));
@@ -821,7 +905,7 @@ function viewStopForm(trip, stopId, newDateArg) {
       h('fieldset', null, h('legend', { text: '其他' }),
         field('參考網址', inp.url),
         field('備註', inp.notes)),
-      existing && state.photoPrefs.enabled ? photoFormSection(existing) : null,
+      existing ? photoFormSection(existing) : null,
       h('div', { class: 'form-actions' },
         h('button', { type: 'submit', class: 'btn primary' }, '儲存'),
         btn('取消', () => (history.length > 1 ? history.back() : go('#today')), 'btn ghost'),
@@ -844,6 +928,10 @@ function viewSettings(trip) {
       h('p', { class: 'big-line', text: trip.title }),
       h('p', { class: 'sub', text: `${trip.startDate} – ${trip.endDate}・時區 ${trip.timeZone}・預設${C.MODE_LABELS[trip.settings.defaultMode]}` }),
       h('a', { class: 'btn ghost', href: '#tripform/edit' }, '編輯名稱、日期與時區')),
+    h('section', { class: 'card' },
+      h('h2', { text: '照片' }),
+      h('p', { class: 'hint', text: '為停靠點加上自己的照片（例如飯店門口、車站入口截圖），可一次選取多張自動配對。' }),
+      h('a', { class: 'btn', href: '#photos' }, '照片整理')),
     h('section', { class: 'card' },
       h('h2', { text: '分享這趟行程' }),
       h('p', { class: 'hint', text: '產生不含完成紀錄與備註的檔案，朋友匯入後即可使用。若含住宿等私人地點，請先確認是否適合分享。' }),
@@ -874,7 +962,8 @@ function viewAppSettings() {
     h('p', { class: 'sub', text: state.lastExportAt ? `上次成功匯出：${formatLocalTime(state.lastExportAt)}` : '尚未匯出過備份' }),
     h('p', { class: 'hint', text: '資料只保存在這支手機的這個 App 中，可能因清除網站資料或系統清理而消失。備份是必要的保險：建議出發前一次、每天結束後一次。備份檔含私人行程，請妥善保存。' }),
     h('div', { class: 'btn-row' },
-      btn('匯出完整備份', () => exportBackup(), 'btn primary', { disabled: !state.trips.length }),
+      btn('匯出完整備份（含照片）', () => exportBackup(), 'btn primary', { disabled: !state.trips.length }),
+      btn('匯出備份（不含照片，檔案較小）', () => exportBackup({ withPhotos: false }), 'btn ghost', { disabled: !state.trips.length }),
       h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入檔案（Excel／CSV／JSON）…'),
       h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容'),
       fileInput)));
@@ -921,15 +1010,25 @@ function viewAppSettings() {
     h('header', { class: 'page-header' }, backLink(), h('h1', { text: 'App 設定／備份' })), sections);
 }
 
+function refreshFormPhoto() {
+  const fs = document.getElementById('photo-fs');
+  if (!fs) return;
+  const trip = activeTrip();
+  const st = trip && trip.stops.find((x) => x.id === fs.dataset.stopId);
+  if (st) fs.replaceWith(photoFormSection(st));
+}
+
 function photoFormSection(stop) {
-  const ph = stop.photo;
-  const status = !ph ? '尚未配對照片。' : ph.hidden ? `已隱藏（${ph.title}）。` : `目前：${ph.title}${ph.confidence === 'low' ? '（自動配對，可能不準確）' : ''}`;
+  const cur = activeTrip().stops.find((x) => x.id === stop.id) || stop;
+  const mine = userPhotoOf(cur);
+  const ph = cur.photo;
+  const wikiOn = state.photoPrefs.enabled;
+  const status = !ph ? '尚未配對維基百科照片。' : ph.hidden ? `維基百科照片已隱藏（${ph.title}）。` : `維基百科：${ph.title}${ph.confidence === 'low' ? '（自動配對，可能不準確）' : ''}`;
   async function research() {
     if (!navigator.onLine) { toast('需要網路才能搜尋', { duration: 3000 }); return; }
     const rejected = ph ? [...(ph.rejected || []), ph.title] : [];
-    const cur = activeTrip().stops.find((x) => x.id === stop.id);
     try {
-      const photo = await PH.lookupPhoto(cur, { rejected });
+      const photo = await PH.lookupPhoto(activeTrip().stops.find((x) => x.id === stop.id), { rejected });
       if (photo) photo.rejected = rejected;
       await updateStop(stop.id, (x) => ({ ...x, photo: photo || (ph ? { ...ph, hidden: true, rejected } : null) }));
       if (photo) {
@@ -940,13 +1039,20 @@ function photoFormSection(stop) {
       toast(`搜尋失敗：${e.message || e}`, { kind: 'error' });
     }
   }
-  return h('fieldset', null, h('legend', { text: '參考照片（維基百科）' }),
-    h('p', { class: 'hint', text: status }),
-    ph && !ph.hidden ? photoBlock(stop, { variant: 'wide' }) : null,
+  return h('fieldset', { id: 'photo-fs', dataset: { stopId: stop.id } }, h('legend', { text: '照片' }),
+    h('p', { class: 'hint', text: mine ? '目前顯示「我的照片」（優先於維基百科照片）。' : '可上傳自己的照片（例如飯店門口或入口的截圖），會自動縮小後保存在手機中。' }),
+    mine ? userPhotoBlock(cur, 'wide') : null,
     h('div', { class: 'btn-row' },
-      btn(ph ? '重新搜尋（排除目前這張）' : '搜尋照片', research, 'btn ghost small'),
-      ph && ph.hidden ? btn('恢復顯示', () => updateStop(stop.id, (x) => ({ ...x, photo: { ...x.photo, hidden: false } })), 'btn ghost small') : null,
-      ph ? btn('移除照片', () => updateStop(stop.id, (x) => ({ ...x, photo: null })), 'btn ghost small') : null));
+      btn(mine ? '更換我的照片' : '上傳自己的照片', () => pickImages({}, (files) => saveUserPhoto(stop.id, files[0])), 'btn small'),
+      mine ? btn('移除我的照片', () => removeUserPhoto(stop.id), 'btn ghost small') : null),
+    wikiOn ? [
+      h('p', { class: 'hint', text: status }),
+      !mine && ph && !ph.hidden ? photoBlock(cur, { variant: 'wide' }) : null,
+      h('div', { class: 'btn-row' },
+        btn(ph ? '重新搜尋（排除目前這張）' : '搜尋維基百科照片', research, 'btn ghost small'),
+        ph && ph.hidden ? btn('恢復顯示', () => updateStop(stop.id, (x) => ({ ...x, photo: { ...x.photo, hidden: false } })), 'btn ghost small') : null,
+        ph ? btn('移除維基百科照片', () => updateStop(stop.id, (x) => ({ ...x, photo: null })), 'btn ghost small') : null),
+    ] : null);
 }
 
 async function setPhotoPrefs(patch) {
@@ -968,15 +1074,17 @@ async function prefetchPhotos() {
   if (!navigator.onLine) { toast('目前沒有網路，請連上 Wi‑Fi 後再試', { duration: 4000 }); return; }
   const targets = [];
   for (const t of state.trips) for (const st of t.stops) {
-    if (PH.wantsPhoto(st) && !(st.photo && st.photo.hidden)) targets.push({ tripId: t.tripId, stopId: st.id });
+    // 已有自己照片的停靠點不需要維基百科照片
+    if (PH.wantsPhoto(st) && !st.userPhoto && !(st.photo && st.photo.hidden)) targets.push({ tripId: t.tripId, stopId: st.id, title: st.title });
   }
-  const job = { running: true, cancel: false, done: 0, total: targets.length, found: 0, failed: 0 };
+  const job = { running: true, cancel: false, done: 0, total: targets.length, found: 0, failed: 0, notFound: 0, log: [] };
   state.photoJob = job;
   render();
-  for (const { tripId, stopId } of targets) {
+  for (const { tripId, stopId, title } of targets) {
     if (job.cancel) break;
     const trip = state.trips.find((t) => t.tripId === tripId);
     const st = trip && trip.stops.find((x) => x.id === stopId);
+    let stage = '搜尋';
     try {
       let photo = st && st.photo;
       if (st && !photo) {
@@ -986,24 +1094,45 @@ async function prefetchPhotos() {
           await commitTrip({ ...t2, stops: t2.stops.map((x) => (x.id === stopId ? { ...x, photo } : x)) }, { rerender: false });
         }
       }
-      if (photo && !(await PH.cachedBlob(photo.thumbUrl))) await PH.downloadToCache(photo.thumbUrl);
-      if (photo) job.found += 1;
-    } catch {
+      if (!photo) {
+        job.notFound += 1;
+        job.log.push({ title, result: 'notfound', detail: '維基百科找不到對應條目' });
+      } else {
+        stage = '下載';
+        if (!(await PH.cachedBlob(photo.thumbUrl))) await PH.downloadToCache(photo.thumbUrl);
+        job.found += 1;
+        job.log.push({ title, result: 'ok', detail: photo.title + (photo.confidence === 'low' ? '（可能不準確）' : '') });
+      }
+    } catch (e) {
       job.failed += 1;
+      job.log.push({ title, result: 'failed', detail: `${stage}失敗：${(e && e.message) || e}` });
     }
     job.done += 1;
     updatePhotoProgress();
+    await new Promise((r) => setTimeout(r, 250)); // 放慢請求，避免被限流
   }
   job.running = false;
-  job.stats = await PH.cacheStats().catch(() => null);
   render();
-  toast(job.cancel ? `已停止：完成 ${job.done}/${job.total}` : `縮圖下載完成：${job.found} 張${job.failed ? `，${job.failed} 筆失敗` : ''}`, { duration: 5000 });
+  toast(job.cancel ? `已停止：完成 ${job.done}/${job.total}` : `完成：找到 ${job.found} 張、找不到 ${job.notFound} 筆${job.failed ? `、失敗 ${job.failed} 筆` : ''}。明細在設定頁。`, { duration: 6000 });
+}
+
+function photoJobReport(job) {
+  if (!job || job.running || !job.log.length) return null;
+  const group = (k) => job.log.filter((x) => x.result === k);
+  const section = (label, list) => (list.length ? h('details', { class: 'job-log' },
+    h('summary', null, `${label}（${list.length}）`),
+    h('ul', { class: 'plain-list' }, list.map((x) => h('li', { text: `${x.title}：${x.detail}` })))) : null);
+  return h('div', { class: 'job-report' },
+    h('p', { class: 'sub', text: `上次下載：找到 ${job.found}、找不到 ${job.notFound}、失敗 ${job.failed}（共 ${job.done}/${job.total}）` }),
+    section('下載失敗', group('failed')),
+    section('找不到條目（飯店、餐廳等常見，可改用自己的照片）', group('notfound')),
+    section('成功', group('ok')));
 }
 
 function updatePhotoProgress() {
   const el = document.getElementById('photo-progress');
   const j = state.photoJob;
-  if (el && j) el.textContent = `處理中 ${j.done}/${j.total}・找到 ${j.found} 張${j.failed ? `・失敗 ${j.failed}` : ''}`;
+  if (el && j) el.textContent = `處理中 ${j.done}/${j.total}・找到 ${j.found}・找不到 ${j.notFound}${j.failed ? `・失敗 ${j.failed}` : ''}`;
 }
 
 function photoSettingsCard() {
@@ -1027,6 +1156,7 @@ function photoSettingsCard() {
           ? btn('停止下載', () => { j.cancel = true; }, 'btn danger')
           : btn('預先下載所有旅程的照片', prefetchPhotos, 'btn primary')),
       h('p', { class: 'sub', id: 'photo-progress', text: j && j.running ? `處理中 ${j.done}/${j.total}…` : '' }),
+      photoJobReport(j),
       h('p', { class: 'hint', text: '建議出發前在 Wi‑Fi 下執行一次：照片會保存在手機中，之後離線或在國外都能看，不會用到國外流量。' }),
       statsEl,
       h('label', { class: 'check' },
@@ -1053,6 +1183,155 @@ async function setMapPrefs(patch) {
   }
   state.mapPrefs = next;
   render();
+}
+
+// ---------- 照片整理（批次） ----------
+function photoTargets(trip, { onlyMissing = false } = {}) {
+  const dates = C.listDates(trip.startDate, trip.endDate);
+  const out = [];
+  for (const d of [...dates, null]) {
+    C.stopsForDate(trip, d).forEach((s, i) => {
+      if (s.type === 'transfer') return;
+      if (onlyMissing && s.userPhoto && state.images.has(s.userPhoto.id)) return;
+      out.push({ ...s, position: i + 1 });
+    });
+  }
+  return out;
+}
+
+function photoThumb(stop) {
+  const mine = userPhotoOf(stop);
+  if (mine) return h('img', { class: 'pm-thumb', src: IM.dataUrl(mine), alt: '' });
+  if (state.photoPrefs.enabled && stop.photo && !stop.photo.hidden && PH.isWikimediaUrl(stop.photo.thumbUrl)) {
+    const img = h('img', { class: 'pm-thumb wiki', alt: '' });
+    const holder = h('span', { class: 'pm-thumb-wrap' }, img);
+    fillPhoto(img, { remove: () => holder.replaceWith(h('span', { class: 'pm-thumb empty', text: '無' })) }, stop.photo.thumbUrl);
+    return holder;
+  }
+  return h('span', { class: 'pm-thumb empty', text: '無' });
+}
+
+function viewPhotos(trip) {
+  const onlyMissing = state.photoFilterMissing === true;
+  const list = photoTargets(trip, { onlyMissing });
+  const allT = photoTargets(trip);
+  const mineCount = allT.filter((s) => userPhotoOf(s)).length;
+  const bytes = allT.reduce((a, s) => a + IM.imageBytes(userPhotoOf(s)), 0);
+  let lastDate;
+  const rows = [];
+  for (const s of list) {
+    if (s.date !== lastDate) {
+      rows.push(h('li', { class: 'pm-date', text: s.date ? C.formatDateShort(s.date) : '候選景點' }));
+      lastDate = s.date;
+    }
+    const mine = userPhotoOf(s);
+    rows.push(h('li', { class: 'pm-row' },
+      photoThumb(s),
+      h('span', { class: 'pm-info' },
+        h('span', { class: 'stop-title', text: s.title }),
+        h('span', { class: 'head-meta', text: [s.date ? `第 ${s.position} 站` : '', s.city, mine ? '我的照片' : (s.photo && !s.photo.hidden && state.photoPrefs.enabled ? '維基百科' : '')].filter(Boolean).join('・') })),
+      h('span', { class: 'pm-actions' },
+        btn(mine ? '更換' : '選照片', () => pickImages({}, (files) => saveUserPhoto(s.id, files[0])), 'btn small'),
+        mine ? btn('移除', () => removeUserPhoto(s.id), 'btn ghost small') : null)));
+  }
+  return h('div', { class: 'view photos-view' },
+    h('header', { class: 'page-header' }, tripSwitch(trip.title), h('h1', { text: '照片整理' })),
+    h('p', { class: 'sub', text: `自己的照片 ${mineCount} 張（約 ${Math.max(1, Math.round(bytes / 1024))} KB）。照片會自動縮小（長邊 640px），原始照片仍留在您的相簿。` }),
+    h('section', { class: 'card' },
+      h('h2', { text: '一次加入多張' }),
+      h('p', { class: 'hint', text: '一次選取多張照片：檔名含地點名稱（例：Karlskirche.jpg、卡爾教堂.png）或「日期＿第幾站」（例：11-12_2.jpg、D1-2.jpg）會自動配對；其餘依選取順序配給下方「尚無照片」的停靠點。確認前都可以修改，不會直接寫入。' }),
+      btn('選取多張照片…', () => pickImages({ multiple: true }, (files) => startBatchAssign(trip, files)), 'btn primary')),
+    h('div', { class: 'seg-row', role: 'group', 'aria-label': '篩選' },
+      h('button', { type: 'button', class: `seg${!onlyMissing ? ' on' : ''}`, 'aria-pressed': String(!onlyMissing), on: { click: () => { state.photoFilterMissing = false; render(); } } }, `全部（${allT.length}）`),
+      h('button', { type: 'button', class: `seg${onlyMissing ? ' on' : ''}`, 'aria-pressed': String(onlyMissing), on: { click: () => { state.photoFilterMissing = true; render(); } } }, `尚無我的照片（${allT.length - mineCount}）`)),
+    list.length ? h('ul', { class: 'pm-list' }, rows) : h('p', { class: 'empty-line', text: onlyMissing ? '每個停靠點都已有自己的照片。' : '沒有停靠點。' }),
+    h('p', { class: 'hint', text: '交通移動類的停靠點不列入。維基百科照片可在「App 設定／備份」開啟並批次下載。' }));
+}
+
+function startBatchAssign(trip, files) {
+  const targets = photoTargets(trip, { onlyMissing: true });
+  const guess = IM.guessAssignments(files.map((f) => ({ name: f.name })), targets, { dates: C.listDates(trip.startDate, trip.endDate) });
+  if (state.pendingPhotos) state.pendingPhotos.items.forEach((it) => URL.revokeObjectURL(it.preview));
+  state.pendingPhotos = {
+    tripId: trip.tripId,
+    items: files.map((f, i) => ({ file: f, name: f.name, preview: URL.createObjectURL(f), stopId: guess[i].stopId, source: guess[i].source })),
+  };
+  go('#photoassign');
+}
+
+function viewPhotoAssign(trip) {
+  const pp = state.pendingPhotos;
+  if (!pp || pp.tripId !== trip.tripId) {
+    return h('div', { class: 'view' }, h('p', { text: '沒有待指派的照片。' }), h('a', { class: 'btn', href: '#photos' }, '回到照片整理'));
+  }
+  const all = photoTargets(trip);
+  const counts = new Map();
+  pp.items.forEach((it) => { if (it.stopId) counts.set(it.stopId, (counts.get(it.stopId) || 0) + 1); });
+  const assigned = pp.items.filter((it) => it.stopId).length;
+  const dup = [...counts.values()].some((n) => n > 1);
+  const label = (s) => `${s.date ? C.formatDateShort(s.date) : '候選'} ${s.date ? `#${s.position} ` : ''}${s.title}${userPhotoOf(s) ? '（已有照片，將取代）' : ''}`;
+  const cancel = () => { pp.items.forEach((it) => URL.revokeObjectURL(it.preview)); state.pendingPhotos = null; go('#photos'); };
+  const progress = h('p', { class: 'sub', id: 'assign-progress' });
+
+  async function confirmAssign() {
+    if (dup) { toast('有兩張以上的照片指派到同一個停靠點，請先調整。', { kind: 'error' }); return; }
+    const todo = pp.items.filter((it) => it.stopId);
+    if (!todo.length) { toast('尚未指派任何照片', { duration: 3000 }); return; }
+    const recs = [];
+    const updates = new Map();
+    let failed = 0;
+    for (let i = 0; i < todo.length; i += 1) {
+      progress.textContent = `處理中 ${i + 1}/${todo.length}…`;
+      try {
+        const r = await IM.resizeToJpeg(todo[i].file);
+        const rec = { id: C.uuid(), ...r, createdAt: C.nowIso() };
+        recs.push(rec);
+        updates.set(todo[i].stopId, { id: rec.id, addedAt: rec.createdAt });
+      } catch { failed += 1; }
+    }
+    try {
+      await DB.putImages(recs);
+    } catch (e) {
+      toast(`儲存照片失敗：${e.message || e}`, { kind: 'error' });
+      return;
+    }
+    recs.forEach((r) => state.images.set(r.id, r));
+    const t = activeTrip();
+    const before = t.stops;
+    const ok = await commitTrip({ ...t, stops: t.stops.map((x) => (updates.has(x.id) ? { ...x, userPhoto: updates.get(x.id) } : x)) }, { rerender: false });
+    if (!ok) return;
+    const kb = Math.round(recs.reduce((a, r) => a + r.bytes, 0) / 1024);
+    pp.items.forEach((it) => URL.revokeObjectURL(it.preview));
+    state.pendingPhotos = null;
+    go('#photos');
+    toast(`已加入 ${recs.length} 張照片（約 ${kb} KB）${failed ? `，${failed} 張無法讀取` : ''}`, {
+      duration: 8000, actionLabel: '復原', action: () => commitTrip({ ...activeTrip(), stops: before }),
+    });
+  }
+
+  return h('div', { class: 'view assign-view' },
+    h('header', { class: 'page-header' }, h('h1', { text: '指派照片' })),
+    h('p', { text: `共 ${pp.items.length} 張，已指派 ${assigned} 張。請確認每張照片對應的停靠點。` }),
+    dup ? h('div', { class: 'form-errors' }, h('p', { text: '有兩張以上的照片指派到同一個停靠點（標示為紅框），請調整。' })) : null,
+    h('ul', { class: 'assign-list' }, pp.items.map((it, i) => {
+      const sel = h('select', {
+        'aria-label': `${it.name} 對應的停靠點`,
+        on: { change: (e) => { it.stopId = e.target.value || null; it.source = it.stopId ? 'manual' : null; render(); } },
+      },
+      h('option', { value: '', selected: !it.stopId }, '（不使用這張）'),
+      all.map((s) => h('option', { value: s.id, selected: s.id === it.stopId }, label(s))));
+      const src = { filename: '依檔名配對', order: '依選取順序', manual: '手動指派' }[it.source] || '未指派';
+      return h('li', { class: `assign-item${it.stopId && counts.get(it.stopId) > 1 ? ' dup' : ''}` },
+        h('img', { src: it.preview, alt: `第 ${i + 1} 張` }),
+        h('div', { class: 'assign-meta' },
+          h('span', { class: 'head-meta', text: `${i + 1}. ${it.name}` }),
+          h('span', { class: `chip${it.source === 'filename' ? ' today' : ''}`, text: src }),
+          sel));
+    })),
+    progress,
+    h('div', { class: 'form-actions' },
+      btn(`確認加入 ${assigned} 張`, confirmAssign, 'btn primary', { disabled: !assigned }),
+      btn('取消', cancel, 'btn ghost')));
 }
 
 // ---------- 匯出 ----------
@@ -1085,16 +1364,18 @@ function fallbackDownload(blob, filename, onDone) {
   onDone(true);
 }
 
-function exportBackup() {
+function exportBackup({ withPhotos = true } = {}) {
   const trip = activeTrip();
-  const backup = C.buildBackup(state.trips);
+  // 照片已在記憶體中，可同步組出備份（iOS 分享面板必須在點擊當下呼叫）
+  const backup = C.buildBackup(state.trips, undefined, withPhotos ? [...state.images.values()] : null);
   const slug = state.trips.length === 1 ? C.slugForFile(state.trips[0].title) : 'trip';
   const name = C.backupFileName(slug === 'trip' ? 'travel-companion-backup' : `${slug}-backup`, new Date(), trip ? trip.timeZone : undefined);
   downloadOrShare(backup, name, async (ok) => {
     if (!ok) return;
     state.lastExportAt = backup.exportedAt;
     await DB.setMeta('lastExportAt', backup.exportedAt).catch(() => {});
-    toast(`已匯出備份：${name}（請存到「檔案」或可靠位置）`, { duration: 5000 });
+    const n = backup.images ? backup.images.length : 0;
+    toast(`已匯出備份：${name}${withPhotos ? `（含 ${n} 張照片）` : '（不含照片）'}。請存到「檔案」或可靠位置。`, { duration: 5000 });
     render();
   });
 }
@@ -1164,8 +1445,9 @@ function viewImport() {
     try {
       if (isBackup) {
         if (state.trips.length && !window.confirm('這會以備份檔「整份取代」目前手機中的所有旅程資料。確定繼續？')) return;
-        await DB.replaceAllTrips(pi.trips);
+        await DB.replaceAllTrips(pi.trips, pi.images);
         state.trips = pi.trips;
+        if (pi.images) state.images = new Map(pi.images.map((im) => [im.id, im]));
       } else {
         if (willReplaceSame && !window.confirm(`這會取代手機中同一個旅程「${single.title}」的資料。確定繼續？`)) return;
         await DB.putTrip(single);
@@ -1186,7 +1468,7 @@ function viewImport() {
   return h('div', { class: 'view import-view' },
     h('header', { class: 'page-header' }, h('h1', { text: '確認匯入' })),
     h('p', { class: 'sub', text: `檔案：${pi.fileName}` }),
-    h('p', { text: isBackup ? '這是完整備份檔。' : '這是單一旅程檔（或分享範本）。' }),
+    h('p', { text: isBackup ? `這是完整備份檔${pi.images ? `，含 ${pi.images.length} 張自己的照片` : '（不含照片；手機中既有的照片會保留）'}。` : '這是單一旅程檔（或分享範本）。' }),
     pi.exportedAt ? h('p', { class: 'sub', text: `匯出時間：${formatLocalTime(pi.exportedAt)}` }) : null,
     pi.summary.map((s) => h('section', { class: 'card' },
       h('p', { class: 'big-line', text: s.title }),
@@ -1511,6 +1793,7 @@ async function removeTrip(trip) {
     return;
   }
   state.trips = state.trips.filter((t) => t.tripId !== trip.tripId);
+  gcImages();
   await switchTrip(state.trips[0] ? state.trips[0].tripId : null);
   toast(`已刪除旅程：${trip.title}`);
   go(state.trips.length ? '#today' : '#welcome');
@@ -1636,6 +1919,9 @@ async function registerServiceWorker() {
 async function init() {
   try {
     state.trips = await DB.getAllTrips();
+    try {
+      state.images = new Map((await DB.getAllImages()).map((im) => [im.id, im]));
+    } catch { state.images = new Map(); }
     state.lastExportAt = await DB.getMeta('lastExportAt', null);
     state.onboardingDismissed = await DB.getMeta('onboardingDismissed', false);
     const savedPhoto = await DB.getMeta('photoPrefs', null);
@@ -1689,6 +1975,7 @@ async function init() {
 
   render();
   registerServiceWorker();
+  setTimeout(gcImages, 3000);
   DB.requestPersistence().then((p) => { state.persisted = p; });
 }
 

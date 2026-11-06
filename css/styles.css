@@ -353,3 +353,24 @@ body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
 .photo-credit { flex: 1 1 200px; overflow-wrap: anywhere; }
 .photo-credit a { color: var(--muted); }
 .photo-warn { flex: 1 1 100%; color: var(--skip); font-weight: 700; font-size: 0.85rem; }
+
+/* ---------- 照片整理 ---------- */
+.seg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 12px 0; }
+.pm-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.pm-date { font-weight: 700; color: var(--muted); margin-top: 10px; }
+.pm-row { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.pm-thumb, .pm-thumb-wrap { flex: 0 0 64px; width: 64px; height: 64px; border-radius: 10px; object-fit: cover; background: var(--bg); display: inline-flex; align-items: center; justify-content: center; overflow: hidden; }
+.pm-thumb-wrap img { width: 100%; height: 100%; object-fit: cover; }
+.pm-thumb.empty { color: var(--muted); font-size: 0.85rem; border: 1px dashed var(--border); }
+.pm-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pm-actions { display: flex; flex-direction: column; gap: 6px; }
+.assign-list { list-style: none; padding: 0; margin: 12px 0; display: flex; flex-direction: column; gap: 10px; }
+.assign-item { display: flex; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; }
+.assign-item.dup { border: 2px solid var(--danger); }
+.assign-item img { flex: 0 0 96px; width: 96px; height: 96px; object-fit: cover; border-radius: 10px; background: var(--bg); }
+.assign-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.assign-meta select { font: inherit; font-size: 16px; min-height: 44px; border-radius: 10px; border: 2px solid var(--border); background: var(--surface); color: var(--text); width: 100%; }
+.edit-top { margin: 0 0 4px; justify-content: flex-end; }
+.job-report { margin: 8px 0; }
+.job-log summary { min-height: 40px; display: flex; align-items: center; font-weight: 600; cursor: pointer; }
+.job-log li { font-size: 0.88rem; }

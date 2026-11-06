@@ -18,6 +18,19 @@ AI_JSON = json.dumps({
     {"date": "2027-03-02", "order": 1, "city": "Tokyo", "title": "明治神宮", "localName": "明治神宮", "type": "attraction", "startTime": "09:00"},
   ]}, ensure_ascii=False)
 
+async def wait_true(page, expr, timeout=10000):
+    """輪詢 page.evaluate（不使用 eval，App 的 CSP 保持嚴格）"""
+    import time
+    end = time.time() + timeout / 1000
+    while time.time() < end:
+        try:
+            if await page.evaluate(expr):
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.1)
+    raise TimeoutError(f'等待逾時：{expr[:60]}')
+
 async def main():
     async with async_playwright() as p:
         kw = {'args': ['--no-sandbox']}
@@ -31,7 +44,7 @@ async def main():
         page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
         await page.goto(BASE); await page.wait_for_selector('.welcome')
         # 等 Service Worker 接管頁面（下載問題只在 SW 控制下出現）
-        await page.wait_for_function('navigator.serviceWorker && navigator.serviceWorker.controller !== null', timeout=10000)
+        await wait_true(page, 'navigator.serviceWorker && navigator.serviceWorker.controller !== null', timeout=10000)
 
         # 說明頁
         await page.click('text=如何建立行程檔？'); await page.wait_for_selector('.guide-view')

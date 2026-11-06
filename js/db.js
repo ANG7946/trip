@@ -1,10 +1,11 @@
 // db.js — IndexedDB 資料存取層（所有讀寫都經由此處）
-import { migrateTrip } from './core.js?v=1.4.0';
+import { migrateTrip } from './core.js?v=1.5.0';
 
 const DB_NAME = 'travel-companion';
-const DB_VERSION = 1; // IndexedDB 結構版本；資料內容版本見 core.SCHEMA_VERSION
+const DB_VERSION = 2; // IndexedDB 結構版本；資料內容版本見 core.SCHEMA_VERSION
 const TRIPS = 'trips';
 const META = 'meta';
+const IMAGES = 'images'; // v2：使用者自己的照片（已縮圖，base64）
 
 let dbPromise = null;
 
@@ -22,6 +23,9 @@ function openDb() {
       if (ev.oldVersion < 1) {
         db.createObjectStore(TRIPS, { keyPath: 'tripId' });
         db.createObjectStore(META, { keyPath: 'key' });
+      }
+      if (ev.oldVersion < 2 && !db.objectStoreNames.contains(IMAGES)) {
+        db.createObjectStore(IMAGES, { keyPath: 'id' });
       }
     };
     req.onsuccess = () => {
@@ -73,13 +77,47 @@ export async function deleteTrip(tripId) {
   await txDone(tx);
 }
 
-/** 整份取代：在同一個交易內清空並寫入；任何一步失敗都會整體回滾。 */
-export async function replaceAllTrips(trips) {
+/**
+ * 整份取代：在同一個交易內清空並寫入；任何一步失敗都會整體回滾。
+ * images 為 null 時保留手機中既有的照片（備份不含照片時）。
+ */
+export async function replaceAllTrips(trips, images = null) {
   const db = await openDb();
-  const tx = db.transaction(TRIPS, 'readwrite');
+  const stores = images ? [TRIPS, IMAGES] : [TRIPS];
+  const tx = db.transaction(stores, 'readwrite');
   const store = tx.objectStore(TRIPS);
   store.clear();
   for (const t of trips) store.put(t);
+  if (images) {
+    const is = tx.objectStore(IMAGES);
+    is.clear();
+    for (const im of images) is.put(im);
+  }
+  await txDone(tx);
+}
+
+// ---------- 使用者照片 ----------
+export async function getAllImages() {
+  const db = await openDb();
+  const tx = db.transaction(IMAGES, 'readonly');
+  return reqP(tx.objectStore(IMAGES).getAll());
+}
+
+/** 一次寫入多張照片（同一交易） */
+export async function putImages(images) {
+  const db = await openDb();
+  const tx = db.transaction(IMAGES, 'readwrite');
+  const st = tx.objectStore(IMAGES);
+  for (const im of images) st.put(im);
+  await txDone(tx);
+}
+
+export async function deleteImages(ids) {
+  if (!ids.length) return;
+  const db = await openDb();
+  const tx = db.transaction(IMAGES, 'readwrite');
+  const st = tx.objectStore(IMAGES);
+  for (const id of ids) st.delete(id);
   await txDone(tx);
 }
 
