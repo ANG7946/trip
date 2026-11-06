@@ -93,9 +93,31 @@ export function nameVariants(s) {
   return [...new Set([full, ...(parts.length > 1 ? parts : [])])];
 }
 
+// 常見城市中心（停靠點沒有座標時，用來排除遠方的同名條目，例如 Volders 的 Karlskirche）
+export const CITY_CENTERS = {
+  vienna: [48.2082, 16.3738], wien: [48.2082, 16.3738], budapest: [47.4979, 19.0402], bratislava: [48.1486, 17.1077],
+  salzburg: [47.8095, 13.0550], prague: [50.0755, 14.4378], praha: [50.0755, 14.4378], munich: [48.1351, 11.5820],
+  berlin: [52.52, 13.405], paris: [48.8566, 2.3522], rome: [41.9028, 12.4964], london: [51.5072, -0.1276],
+  tokyo: [35.6762, 139.6503], kyoto: [35.0116, 135.7681], osaka: [34.6937, 135.5023], seoul: [37.5665, 126.978], taipei: [25.033, 121.5654],
+};
+// 城市的各種寫法（標題含城市名稱時加分）
+const CITY_ALIASES = {
+  vienna: ['vienna', 'wien', 'wiener'], wien: ['vienna', 'wien', 'wiener'],
+  budapest: ['budapest', 'budapesti'], bratislava: ['bratislava', 'bratislavsky', 'bratislavska', 'pozsony'],
+  prague: ['prague', 'praha', 'prazsky'], praha: ['prague', 'praha', 'prazsky'],
+};
+
+function qualifier(title) {
+  const m = String(title || '').match(/\(([^)]+)\)\s*$/) || String(title || '').match(/,\s*([^,]+)$/);
+  return m ? normName(m[1]) : '';
+}
+
 export function pickBestPage(pages, stop, { rejected = [] } = {}) {
   const names = [...nameVariants(stop.localName), ...nameVariants(stop.title)].map(normName).filter(Boolean);
-  const cityNames = new Set([normName(stop.city)].filter(Boolean));
+  const cityKey = normName(stop.city);
+  const cityNames = new Set([cityKey].filter(Boolean));
+  const aliases = CITY_ALIASES[cityKey] || (cityKey ? [cityKey] : []);
+  const center = CITY_CENTERS[cityKey] ? { lat: CITY_CENTERS[cityKey][0], lng: CITY_CENTERS[cityKey][1] } : null;
   const here = stopCoords(stop);
   const scored = [];
   for (const p of pages || []) {
@@ -114,7 +136,14 @@ export function pickBestPage(pages, stop, { rejected = [] } = {}) {
       if (dist <= 300) score += 2;
       else if (dist <= 1500) score += 1;
       else if (dist > 15000) score -= 2;
+    } else if (center && there && distanceMeters(center, there) > 40000) {
+      continue; // 沒有停靠點座標時，以城市中心排除遠方的同名地點
     }
+    // 標題含城市名稱（Wiener Karlskirche、Stephansdom (Wien)）加分；括號／逗號後是其他地名則扣分
+    const words = new Set(t.split(' '));
+    if (aliases.some((a) => words.has(a))) score += 1;
+    const q = qualifier(p.title);
+    if (q && aliases.length && !aliases.some((a) => q.includes(a)) && !names.some((n) => n.includes(q))) score -= 2;
     scored.push({ page: p, score, dist, index: p.index ?? 999 });
   }
   if (!scored.length) return null;
@@ -242,17 +271,31 @@ export function cleanImageUrl(s) {
 }
 
 // ---------- 查詢（fetch 可注入，方便測試） ----------
-async function getJson(fetchFn, url) {
-  const res = await fetchFn(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 取得 JSON；遇到限流（429）或暫時錯誤（503）依 Retry-After 或指數退避重試，最多 3 次 */
+async function getJson(fetchFn, url, { wait = sleepMs, tries = 4 } = {}) {
+  let delay = 2000;
+  for (let i = 0; i < tries; i += 1) {
+    const res = await fetchFn(url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (res.ok) return res.json();
+    if ((res.status === 429 || res.status === 503) && i < tries - 1) {
+      const ra = Number(res.headers && res.headers.get ? res.headers.get('retry-after') : NaN);
+      await wait(Number.isFinite(ra) && ra > 0 ? Math.min(ra, 15) * 1000 : delay);
+      delay *= 2;
+      continue;
+    }
+    throw new Error(`HTTP ${res.status}`);
+  }
+  throw new Error('HTTP 429');
 }
 
 /**
  * 為停靠點找一張縮圖並取得授權資訊。
  * 有座標時先以地理搜尋（較準），再以名稱搜尋。找不到回傳 null。
  */
-export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {}) {
+export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [], wait } = {}) {
+  const gj = (f, u) => getJson(f, u, wait ? { wait } : undefined);
   let pick = null;
   let lang = 'en';
   let lastErr = null;
@@ -262,7 +305,7 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
     // 地理搜尋也必須名稱吻合才採用，避免抓到隔壁建築（例如漁人堡旁的馬加什教堂）
     for (const gl of [...new Set([localLang(stop), 'en'].filter(Boolean))]) {
       try {
-        const geo = await getJson(fetchFn, geoSearchUrl(here, gl));
+        const geo = await gj(fetchFn, geoSearchUrl(here, gl));
         anyOk = true;
         const candidate = pickBestPage(geo?.query?.pages, stop, { rejected });
         if (candidate) { pick = candidate; lang = gl; break; }
@@ -272,7 +315,7 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
   if (!pick) {
     for (const plan of searchPlans(stop)) {
       try {
-        const txt = await getJson(fetchFn, textSearchUrl(stop, plan));
+        const txt = await gj(fetchFn, textSearchUrl(stop, plan));
         anyOk = true;
         const cand = pickBestPage(txt?.query?.pages, stop, { rejected });
         if (cand) { pick = cand; lang = plan.lang; break; }
@@ -291,7 +334,7 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
   let thumbUrl = cleanImageUrl(page.thumbnail.source);
   let fileUrl = `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(page.pageimage)}`;
   try {
-    const info = await getJson(fetchFn, imageInfoUrl(page.pageimage));
+    const info = await gj(fetchFn, imageInfoUrl(page.pageimage));
     const ii = info?.query?.pages?.[0]?.imageinfo?.[0];
     if (ii) {
       const md = ii.extmetadata || {};

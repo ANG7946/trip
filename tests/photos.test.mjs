@@ -199,3 +199,32 @@ test('「Hofburg / Heldenplatz」拆成多個名稱搜尋與比對', () => {
   assert.ok(plans.includes('de:Hofburg') && plans.includes('de:Heldenplatz'), plans.join());
   assert.equal(PH.pickBestPage([page('Heldenplatz', null, null)], stop).page.title, 'Heldenplatz');
 });
+
+test('同名異地：沒有座標時以城市中心排除（Volders 的 Karlskirche），標題含城市名者優先', () => {
+  const stop = { title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna' };
+  const r = PH.pickBestPage([
+    page('Karlskirche (Volders)', 47.2876, 11.5713, { index: 2 }),
+    page('Wiener Karlskirche', 48.1982, 16.3718, { index: 1 }),
+  ], stop);
+  assert.equal(r.page.title, 'Wiener Karlskirche');
+  // 即使沒有座標資訊，括號內是其他地名也會被扣分
+  const r2 = PH.pickBestPage([page('Karlskirche (Volders)', null, null, { index: 1 }), page('Wiener Karlskirche', null, null, { index: 2 })], stop);
+  assert.equal(r2.page.title, 'Wiener Karlskirche');
+});
+
+test('限流（429）時依 Retry-After 等待後重試成功；持續 429 才失敗', async () => {
+  let n = 0;
+  const waits = [];
+  const res429 = { ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '3' : null) } };
+  const okBody = { query: { pages: [page('Karlskirche', null, null)] } };
+  const fetchFn = async (u) => {
+    if (u.includes('commons')) return { ok: true, status: 200, json: async () => ({}) };
+    n += 1;
+    return n <= 2 ? res429 : { ok: true, status: 200, json: async () => okBody };
+  };
+  const p = await PH.lookupPhoto({ title: '卡爾教堂', localName: 'Karlskirche', city: 'Somewhere' }, { fetchFn, wait: async (ms) => waits.push(ms) });
+  assert.equal(p.title, 'Karlskirche');
+  assert.deepEqual(waits, [3000, 3000]);
+  const always = async () => res429;
+  await assert.rejects(() => PH.lookupPhoto({ title: 'X', localName: 'Karlskirche', city: 'Somewhere' }, { fetchFn: always, wait: async () => {} }), /HTTP 429/);
+});

@@ -1,12 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.6.1';
-import * as DB from './db.js?v=1.6.1';
-import * as V from './csv.js?v=1.6.1';
-import * as X from './xlsx.js?v=1.6.1';
-import * as PH from './photos.js?v=1.6.1';
-import * as IM from './images.js?v=1.6.1';
+import * as C from './core.js?v=1.6.2';
+import * as DB from './db.js?v=1.6.2';
+import * as V from './csv.js?v=1.6.2';
+import * as X from './xlsx.js?v=1.6.2';
+import * as PH from './photos.js?v=1.6.2';
+import * as IM from './images.js?v=1.6.2';
 
-export const APP_VERSION = '1.6.1';
+export const APP_VERSION = '1.6.2';
 
 // ---------- 狀態 ----------
 const state = {
@@ -1127,12 +1127,14 @@ async function prefetchPhotos({ redo = false } = {}) {
     const trip = state.trips.find((t) => t.tripId === tripId);
     const st = trip && trip.stops.find((x) => x.id === stopId);
     let stage = '搜尋';
+    let twinUsed = false;
     try {
       let photo = st && st.photo;
       const rejected = (photo && photo.rejected) || [];
       if (redo && photo && !photo.hidden) photo = null;
       const needLookup = st && !photo;
       const twin = needLookup ? resolved.find((d) => d.tripId === tripId && IM.samePlace(d.st, st)) : null;
+      twinUsed = !!twin || !needLookup;
       if (needLookup) {
         if (twin) {
           // 同一地點：沿用已查到的結果（但排除這一站曾標記「不是這張」的條目）
@@ -1162,7 +1164,7 @@ async function prefetchPhotos({ redo = false } = {}) {
     }
     job.done += 1;
     updatePhotoProgress();
-    await new Promise((r) => setTimeout(r, 250)); // 放慢請求，避免被限流
+    await new Promise((r) => setTimeout(r, twinUsed ? 0 : 900)); // 放慢請求，避免被維基百科限流（HTTP 429）
   }
   job.running = false;
   render();
