@@ -320,3 +320,16 @@ code.url { display: block; font-size: 0.75rem; color: var(--muted); overflow-wra
   background: var(--surface); color: var(--text); margin: 10px 0;
 }
 .preview-list { max-height: 320px; overflow: auto; font-size: 0.95rem; }
+
+/* ---------- 回到我的旅程 ---------- */
+.trip-switch {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+  min-height: 44px; padding: 4px 12px 4px 4px; margin-left: -4px;
+  border-radius: 999px; text-decoration: none; color: var(--text);
+}
+.trip-switch:active { background: var(--border); }
+.trip-switch-home {
+  flex: 0 0 auto; font-size: 0.85rem; font-weight: 700; color: var(--primary);
+  border: 1.5px solid var(--primary); border-radius: 999px; padding: 4px 10px;
+}
+.trip-switch-title { font-weight: 700; color: var(--muted); font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

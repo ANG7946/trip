@@ -1,9 +1,9 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.1.1';
-import * as DB from './db.js?v=1.1.1';
-import * as V from './csv.js?v=1.1.1';
+import * as C from './core.js?v=1.1.2';
+import * as DB from './db.js?v=1.1.2';
+import * as V from './csv.js?v=1.1.2';
 
-export const APP_VERSION = '1.1.1';
+export const APP_VERSION = '1.1.2';
 
 // ---------- 狀態 ----------
 const state = {
@@ -223,9 +223,16 @@ function renderTabBar() {
   const nav = document.getElementById('tabbar');
   nav.replaceChildren(...tabs.map(([name, label, href]) => {
     const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
-      || (name === 'settings' && ['tripform', 'trips', 'import', 'maptest', 'guide', 'paste'].includes(r));
+      || (name === 'settings' && ['tripform', 'import', 'maptest', 'guide', 'paste'].includes(r));
     return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
   }));
+}
+
+// ---------- 共用：回到「我的旅程」 ----------
+function tripSwitch(title) {
+  return h('a', { class: 'trip-switch', href: '#trips', 'aria-label': `回到我的旅程列表（目前：${title}）` },
+    h('span', { class: 'trip-switch-home', text: '‹ 我的旅程' }),
+    h('span', { class: 'trip-switch-title', text: title }));
 }
 
 // ---------- 共用：頁首與日期切換 ----------
@@ -241,7 +248,7 @@ function dayHeader(trip, { title } = {}) {
     `${C.formatDateShort(d)}${d === state.todayInTrip ? '・今天' : ''}`)));
 
   return h('header', { class: 'day-header' },
-    h('div', { class: 'trip-title' }, title || trip.title),
+    tripSwitch(title || trip.title),
     h('div', { class: 'date-row' },
       btn('‹ 前一天', () => setViewDate(dates[idx - 1]), 'btn ghost date-step', { disabled: idx <= 0, 'aria-label': '前一天' }),
       select,
@@ -483,7 +490,7 @@ function viewDates(trip) {
   const all = C.progress(trip.stops.filter((s) => s.date !== null));
   return h('div', { class: 'view dates-view' },
     h('header', { class: 'page-header' },
-      h('div', { class: 'trip-title', text: trip.title }),
+      tripSwitch(trip.title),
       h('p', { class: 'sub', text: `${C.formatDateShort(trip.startDate)} – ${C.formatDateShort(trip.endDate)}・時區 ${trip.timeZone}` }),
       h('p', { class: 'sub', text: `全程：完成 ${all.completed} / ${all.total}，略過 ${all.skipped}` })),
     h('ul', { class: 'date-list' }, dates.map((d) => {
@@ -737,7 +744,7 @@ function viewSettings(trip) {
       h('p', { class: 'sub', text: `${trip.startDate} – ${trip.endDate}・時區 ${trip.timeZone}` }),
       h('div', { class: 'btn-row' },
         h('a', { class: 'btn ghost', href: '#tripform/edit' }, '編輯旅程資訊'),
-        h('a', { class: 'btn ghost', href: '#trips' }, `切換或新增旅程（共 ${state.trips.length}）`))));
+        h('a', { class: 'btn ghost', href: '#trips' }, `我的旅程（共 ${state.trips.length}）`))));
 
     sections.push(h('section', { class: 'card' },
       h('h2', { text: '地圖' }),
@@ -1137,23 +1144,34 @@ async function switchTrip(tripId) {
 }
 
 function viewTrips() {
-  return h('div', { class: 'view' },
-    h('header', { class: 'page-header' }, h('h1', { text: '我的旅程' })),
-    h('ul', { class: 'date-list' }, state.trips
-      .slice().sort((a, b) => (a.startDate < b.startDate ? 1 : -1))
-      .map((t) => {
-        const p = C.progress(t.stops.filter((s) => s.date !== null));
-        return h('li', null, h('button', {
-          type: 'button', class: `date-item${t.tripId === state.activeTripId ? ' is-today' : ''}`,
-          on: { click: async () => { await switchTrip(t.tripId); go('#today'); } },
-        },
-        h('span', { class: 'date-item-top' }, h('strong', { text: t.title }), t.tripId === state.activeTripId ? h('span', { class: 'chip today', text: '使用中' }) : null),
-        h('span', { class: 'date-item-sub', text: `${t.startDate} – ${t.endDate}・完成 ${p.completed}/${p.total}` })));
-      })),
-    h('div', { class: 'btn-row' },
-      h('a', { class: 'btn primary', href: '#tripform/new' }, '＋ 建立新旅程'),
-      btn('載入示範旅程', loadDemo, 'btn ghost'),
-      h('a', { class: 'btn ghost', href: '#settings' }, '返回設定')));
+  const sorted = state.trips.slice().sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
+  return h('div', { class: 'view trips-view' },
+    h('header', { class: 'page-header' },
+      h('h1', { text: '我的旅程' }),
+      h('p', { class: 'sub', text: '點選旅程即可進入；資料只存在這支手機。' })),
+    sorted.length ? h('ul', { class: 'date-list' }, sorted.map((t) => {
+      const p = C.progress(t.stops.filter((s) => s.date !== null));
+      const r = C.resolveDefaultDate(t);
+      const phase = r.phase === 'during' ? '進行中' : r.phase === 'before' ? '尚未出發' : '已結束';
+      return h('li', null, h('button', {
+        type: 'button', class: `date-item${t.tripId === state.activeTripId ? ' is-today' : ''}`,
+        on: { click: async () => { await switchTrip(t.tripId); go('#today'); } },
+      },
+      h('span', { class: 'date-item-top' },
+        h('strong', { text: t.title }),
+        h('span', { class: `chip${r.phase === 'during' ? ' today' : ''}`, text: phase }),
+        t.tripId === state.activeTripId ? h('span', { class: 'chip city', text: '上次使用' }) : null),
+      h('span', { class: 'date-item-sub', text: `${C.formatDateShort(t.startDate)} – ${C.formatDateShort(t.endDate)}・完成 ${p.completed}/${p.total}・略過 ${p.skipped}` })));
+    })) : h('p', { class: 'empty-line', text: '目前沒有旅程。' }),
+    h('section', { class: 'card' },
+      h('h2', { text: '新增旅程' }),
+      h('div', { class: 'btn-col' },
+        h('a', { class: 'btn primary', href: '#tripform/new' }, '＋ 建立新旅程'),
+        h('label', { class: 'btn ghost', for: 'trips-import', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
+        h('input', { type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'trips-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
+        h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容（例如 AI 產生的 JSON）'),
+        h('a', { class: 'btn ghost', href: '#guide' }, '如何建立行程？'),
+        btn('載入示範旅程', loadDemo, 'btn ghost'))));
 }
 
 function viewTripForm(trip) {

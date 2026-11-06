@@ -32,6 +32,12 @@ async def main():
         href = await page.get_attribute('.next-card a.btn.nav', 'href')
         check('Apple Maps 網址', href == 'https://maps.apple.com/directions?destination=Karlskirche%2C+Vienna&mode=walking', href)
         await page.screenshot(path=f'{SHOTS}/02-today.png', full_page=True)
+        # 回到我的旅程
+        await page.click('.day-header .trip-switch'); await page.wait_for_selector('.trips-view')
+        check('頁首可回到我的旅程', '示範旅程' in await page.inner_text('.trips-view'))
+        await page.screenshot(path=f'{SHOTS}/09-trips-home.png', full_page=True)
+        await page.click('.trips-view .date-item'); await page.wait_for_selector('.next-card')
+        check('從我的旅程進入旅程', '卡爾教堂' in await page.inner_text('.next-name'))
         # 切換交通方式
         await page.click('.next-card .seg:has-text("大眾運輸")')
         href = await page.get_attribute('.next-card a.btn.nav', 'href')
