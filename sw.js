@@ -1,14 +1,14 @@
 // sw.js — 只快取網站資產（app shell）；行程資料存在 IndexedDB，不經過這裡
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const CACHE = `tc-shell-${VERSION}`;
 const ASSETS = [
   './',
   './index.html',
-  './css/styles.css?v=1.2.0',
-  './js/app.js?v=1.2.0',
-  './js/core.js?v=1.2.0',
-  './js/db.js?v=1.2.0',
-  './js/csv.js?v=1.2.0',
+  './css/styles.css?v=1.2.1',
+  './js/app.js?v=1.2.1',
+  './js/core.js?v=1.2.1',
+  './js/db.js?v=1.2.1',
+  './js/csv.js?v=1.2.1',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -50,7 +50,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // 外部連結（地圖等）一律不攔截
 
-  if (req.mode === 'navigate') {
+  // 只有 App 頁面本身（/ 或 index.html）才回傳 App 外殼。
+  // 下載連結（例如 trip-template.csv）在部分瀏覽器也是 navigate 請求，必須回傳檔案本身。
+  const isAppPage = url.pathname.endsWith('/') || url.pathname.endsWith('/index.html');
+  if (req.mode === 'navigate' && isAppPage) {
     // 頁面導覽：快取優先，確保離線時從主畫面也能開啟
     event.respondWith((async () => {
       const cache = await caches.open(CACHE);

@@ -30,6 +30,8 @@ async def main():
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
         await page.goto(BASE); await page.wait_for_selector('.welcome')
+        # 等 Service Worker 接管頁面（下載問題只在 SW 控制下出現）
+        await page.wait_for_function('navigator.serviceWorker && navigator.serviceWorker.controller !== null', timeout=10000)
 
         # 說明頁
         await page.click('text=如何建立行程檔？'); await page.wait_for_selector('.guide-view')
@@ -43,6 +45,24 @@ async def main():
         d = await dl.value
         csv_path = await d.path()
         check('下載 CSV 範本', d.suggested_filename == 'trip-template.csv')
+        head = open(csv_path, 'rb').read(200).decode('utf-8', 'replace')
+        check('下載的 CSV 內容正確（不是網頁 HTML）', head.lstrip('\ufeff').startswith('日期,順序,城市,名稱') and '<html' not in head.lower(), head[:40])
+        async with page.expect_download() as dl2:
+            await page.click('.guide-view a:has-text("下載 JSON 範本")')
+        jhead = open(await (await dl2.value).path(), 'rb').read(100).decode('utf-8', 'replace')
+        check('下載的 JSON 範本內容正確', jhead.lstrip().startswith('{'), jhead[:30])
+
+        # 直接以「開啟頁面」方式請求 CSV（部分瀏覽器的下載連結即是如此），不可被 SW 換成 App 首頁
+        nav = await ctx.new_page()
+        served_html = False
+        try:
+            resp = await nav.goto(BASE + 'data/trip-template.csv')
+            body = await resp.text() if resp else ''
+            served_html = '<html' in body.lower()
+        except Exception as e:
+            served_html = False  # 觸發下載＝拿到 CSV 本身
+        await nav.close()
+        check('以頁面導覽開啟 CSV 不會拿到網頁 HTML', not served_html)
 
         # 貼上 AI JSON
         await page.goto(BASE + '#paste'); await page.wait_for_selector('.paste-box')
