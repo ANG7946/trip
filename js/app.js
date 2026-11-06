@@ -1,9 +1,9 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.1.2';
-import * as DB from './db.js?v=1.1.2';
-import * as V from './csv.js?v=1.1.2';
+import * as C from './core.js?v=1.1.3';
+import * as DB from './db.js?v=1.1.3';
+import * as V from './csv.js?v=1.1.3';
 
-export const APP_VERSION = '1.1.2';
+export const APP_VERSION = '1.1.3';
 
 // ---------- 狀態 ----------
 const state = {
@@ -221,6 +221,11 @@ function renderTabBar() {
     ['settings', '設定／備份', '#settings'],
   ];
   const nav = document.getElementById('tabbar');
+  // 分頁都是針對「目前旅程」；在旅程列表或尚無旅程時隱藏，避免誤入上次使用的旅程
+  const hide = r === 'trips' || !activeTrip();
+  nav.hidden = hide;
+  document.body.classList.toggle('no-tabbar', hide);
+  if (hide) { nav.replaceChildren(); return; }
   nav.replaceChildren(...tabs.map(([name, label, href]) => {
     const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
       || (name === 'settings' && ['tripform', 'import', 'maptest', 'guide', 'paste'].includes(r));
@@ -1171,7 +1176,13 @@ function viewTrips() {
         h('input', { type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'trips-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
         h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容（例如 AI 產生的 JSON）'),
         h('a', { class: 'btn ghost', href: '#guide' }, '如何建立行程？'),
-        btn('載入示範旅程', loadDemo, 'btn ghost'))));
+        btn('載入示範旅程', loadDemo, 'btn ghost'))),
+    state.trips.length ? h('section', { class: 'card' },
+      h('h2', { text: '備份與還原' }),
+      h('p', { class: 'hint', text: state.lastExportAt ? `上次備份：${formatLocalTime(state.lastExportAt)}。完整備份包含所有旅程。` : '尚未備份。完整備份包含所有旅程。' }),
+      h('div', { class: 'btn-row' },
+        btn('匯出完整備份', () => exportBackup(), 'btn'),
+        h('a', { class: 'btn ghost', href: '#settings' }, '設定／備份'))) : null);
 }
 
 function viewTripForm(trip) {

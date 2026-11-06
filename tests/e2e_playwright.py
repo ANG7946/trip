@@ -35,9 +35,11 @@ async def main():
         # 回到我的旅程
         await page.click('.day-header .trip-switch'); await page.wait_for_selector('.trips-view')
         check('頁首可回到我的旅程', '示範旅程' in await page.inner_text('.trips-view'))
+        check('我的旅程頁不顯示底部分頁', not await page.is_visible('#tabbar'))
         await page.screenshot(path=f'{SHOTS}/09-trips-home.png', full_page=True)
         await page.click('.trips-view .date-item'); await page.wait_for_selector('.next-card')
         check('從我的旅程進入旅程', '卡爾教堂' in await page.inner_text('.next-name'))
+        check('進入旅程後顯示底部分頁', await page.is_visible('#tabbar'))
         # 切換交通方式
         await page.click('.next-card .seg:has-text("大眾運輸")')
         href = await page.get_attribute('.next-card a.btn.nav', 'href')

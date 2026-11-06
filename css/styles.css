@@ -333,3 +333,6 @@ code.url { display: block; font-size: 0.75rem; color: var(--muted); overflow-wra
   border: 1.5px solid var(--primary); border-radius: 999px; padding: 4px 10px;
 }
 .trip-switch-title { font-weight: 700; color: var(--muted); font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+body.no-tabbar { padding-bottom: calc(var(--safe-bottom) + 24px); }
+body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
+.tabbar[hidden] { display: none; }
