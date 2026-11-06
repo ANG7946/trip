@@ -21,17 +21,17 @@ def page_for(q):
         return {'query': {}}
     t = q
     return {'query': {'pages': [{'title': t, 'index': 1, 'pageimage': f'{t}.jpg',
-        'thumbnail': {'source': f'https://upload.wikimedia.org/thumb/{t.replace(" ", "_")}/330px-{t.replace(" ", "_")}.png', 'width': 330, 'height': 248}}]}}
+        'thumbnail': {'source': f'https://thumb.wikimedia.org/wikipedia/commons/thumb/{t.replace(" ", "_")}/330px-{t.replace(" ", "_")}.png', 'width': 330, 'height': 248}}]}}
 
 async def route_wiki(route):
     url = route.request.url
     wiki_hits.append(url)
     u = urlparse(url); qs = parse_qs(u.query)
     headers = {'Access-Control-Allow-Origin': '*'}
-    if u.hostname == 'upload.wikimedia.org':
+    if u.hostname in ('upload.wikimedia.org', 'thumb.wikimedia.org'):
         return await route.fulfill(status=200, body=PNG, headers={**headers, 'Content-Type': 'image/png'})
     if u.hostname == 'commons.wikimedia.org':
-        body = {'query': {'pages': [{'imageinfo': [{'thumburl': 'https://upload.wikimedia.org/thumb/x.png',
+        body = {'query': {'pages': [{'imageinfo': [{'thumburl': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/x/xx/X.png/330px-X.png?utm_source=commons.wikimedia.org',
             'descriptionurl': 'https://commons.wikimedia.org/wiki/File:x.png',
             'extmetadata': {'Artist': {'value': '<b>Test Author</b>'}, 'LicenseShortName': {'value': 'CC BY-SA 4.0'}, 'LicenseUrl': {'value': 'https://creativecommons.org/licenses/by-sa/4.0'}}}]}]}}
         return await route.fulfill(status=200, body=json.dumps(body), headers={**headers, 'Content-Type': 'application/json'})

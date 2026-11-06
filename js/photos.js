@@ -85,8 +85,16 @@ export function nameMatchKind(names, pageTitle) {
  * 為候選條目評分，挑出最合適者。寧缺勿濫：名稱必須吻合才採用。
  * 回傳 { page, confidence: 'high'|'medium', nameMatch: true } 或 null。
  */
+/** 名稱拆分：「Hofburg / Heldenplatz」、「A，B」視為多個可能名稱 */
+export function nameVariants(s) {
+  const full = String(s || '').trim();
+  if (!full) return [];
+  const parts = full.split(/\s*[\/／|｜;；、，,]\s*/).map((x) => x.trim()).filter((x) => x.length >= 2);
+  return [...new Set([full, ...(parts.length > 1 ? parts : [])])];
+}
+
 export function pickBestPage(pages, stop, { rejected = [] } = {}) {
-  const names = [stop.localName, stop.title].filter(Boolean).map(normName).filter(Boolean);
+  const names = [...nameVariants(stop.localName), ...nameVariants(stop.title)].map(normName).filter(Boolean);
   const cityNames = new Set([normName(stop.city)].filter(Boolean));
   const here = stopCoords(stop);
   const scored = [];
@@ -170,8 +178,15 @@ export function searchPlans(stop) {
   const city = (stop.city || '').trim();
   const ll = localLang(stop);
   const add = (lang, q) => { if (q && !plans.some((x) => x.lang === lang && x.q === q)) plans.push({ lang, q }); };
-  if (local && ll && ll !== 'en') { add(ll, local); add(ll, [local, city].filter(Boolean).join(' ')); }
-  if (local) { add('en', local); add('en', [local, city].filter(Boolean).join(' ')); }
+  const locals = nameVariants(local);
+  if (locals.length && ll && ll !== 'en') {
+    for (const n of locals) add(ll, n);
+    add(ll, [locals[0], city].filter(Boolean).join(' '));
+  }
+  if (locals.length) {
+    for (const n of locals) add('en', n);
+    add('en', [locals[0], city].filter(Boolean).join(' '));
+  }
   if (title && !CJK_RE.test(title)) { add('en', [title, city].filter(Boolean).join(' ')); add('en', title); }
   if (title && CJK_RE.test(title)) add('zh', title);
   return plans;
@@ -201,13 +216,28 @@ export function stripHtml(s) {
     .replace(/\s+/g, ' ').trim();
 }
 
-/** 只接受 Wikimedia 網域的 https 圖片網址 */
+// 維基媒體的圖片網域（2026 年起 API 回傳的縮圖多改用 thumb.wikimedia.org）
+export const WIKIMEDIA_IMAGE_HOSTS = ['upload.wikimedia.org', 'thumb.wikimedia.org'];
+
+/** 只接受 Wikimedia 圖片網域的 https 網址 */
 export function isWikimediaUrl(s) {
   try {
     const u = new URL(s);
-    return u.protocol === 'https:' && (u.hostname === 'upload.wikimedia.org');
+    return u.protocol === 'https:' && WIKIMEDIA_IMAGE_HOSTS.includes(u.hostname);
   } catch {
     return false;
+  }
+}
+
+/** 去掉追蹤參數（utm_…），讓快取鍵穩定 */
+export function cleanImageUrl(s) {
+  try {
+    const u = new URL(s);
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return s;
   }
 }
 
@@ -258,7 +288,7 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
   let artist = '';
   let license = '';
   let licenseUrl = '';
-  let thumbUrl = page.thumbnail.source;
+  let thumbUrl = cleanImageUrl(page.thumbnail.source);
   let fileUrl = `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(page.pageimage)}`;
   try {
     const info = await getJson(fetchFn, imageInfoUrl(page.pageimage));
@@ -268,7 +298,7 @@ export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {})
       artist = stripHtml(md.Artist?.value || md.Credit?.value || '');
       license = stripHtml(md.LicenseShortName?.value || '');
       licenseUrl = isSafeLink(md.LicenseUrl?.value) ? md.LicenseUrl.value : '';
-      if (ii.thumburl && isWikimediaUrl(ii.thumburl)) thumbUrl = ii.thumburl;
+      if (ii.thumburl && isWikimediaUrl(ii.thumburl)) thumbUrl = cleanImageUrl(ii.thumburl);
       if (ii.descriptionurl && isSafeLink(ii.descriptionurl)) fileUrl = ii.descriptionurl;
     }
   } catch { /* 授權資訊取得失敗：仍保留來源連結 */ }
@@ -312,7 +342,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 把縮圖網址中的寬度（.../330px-File.jpg）換成另一個標準寬度 */
 export function withThumbWidth(url, width) {
-  return url.replace(/\/(\d+)px-([^/]+)$/, `/${width}px-$2`);
+  return cleanImageUrl(url).replace(/\/(\d+)px-([^/]+)$/, `/${width}px-$2`);
 }
 
 /**

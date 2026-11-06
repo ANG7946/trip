@@ -170,3 +170,32 @@ test('某語言查詢失敗（例如 404）時繼續嘗試其他語言；全部�
   const errOnly = async () => ({ ok: false, status: 503, json: async () => ({}) });
   await assert.rejects(() => PH.lookupPhoto({ title: 'X', localName: 'Karlskirche', city: 'Vienna' }, { fetchFn: errOnly }), /HTTP 503/);
 });
+
+test('接受 thumb.wikimedia.org（2026 起 API 回傳的縮圖網域）並去除追蹤參數', () => {
+  const u = 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/39/K.jpg/330px-K.jpg?utm_source=de.wikipedia.org&utm_campaign=api';
+  assert.equal(PH.isWikimediaUrl(u), true);
+  assert.equal(PH.cleanImageUrl(u), 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/39/K.jpg/330px-K.jpg');
+  assert.equal(PH.withThumbWidth(u, 250), 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/39/K.jpg/250px-K.jpg');
+  assert.equal(PH.isWikimediaUrl('https://thumb.wikimedia.org.evil.example/x.jpg'), false);
+});
+
+test('實際回應格式（2026-11 以真實德文維基驗證）：thumb 網域可被採用', async () => {
+  const real = { query: { pages: [
+    { pageid: 81847, ns: 0, title: 'Johann Bernhard Fischer von Erlach', index: 5, thumbnail: { source: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/db/J.jpg/330px-J.jpg?utm_source=de.wikipedia.org', width: 330, height: 425 }, pageimage: 'J.jpg' },
+    { pageid: 82120, ns: 0, title: 'Wiener Karlskirche', index: 1, thumbnail: { source: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/39/Karlskirche_Abendsonne_1.jpg/330px-Karlskirche_Abendsonne_1.jpg?utm_source=de.wikipedia.org&utm_campaign=api&utm_content=thumbnail', width: 330, height: 220 }, pageimage: 'Karlskirche_Abendsonne_1.jpg' },
+  ] } };
+  const commons = { query: { pages: [{ imageinfo: [{ thumburl: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/39/Karlskirche_Abendsonne_1.jpg/330px-Karlskirche_Abendsonne_1.jpg?utm_source=commons.wikimedia.org', descriptionurl: 'https://commons.wikimedia.org/wiki/File:Karlskirche_Abendsonne_1.jpg', extmetadata: { Artist: { value: '<a href="//commons.wikimedia.org/wiki/User:Thomas_Ledl">Thomas Ledl</a>' }, LicenseShortName: { value: 'CC BY-SA 4.0' } } }] }] } };
+  const fetchFn = mockFetch([[(u) => u.includes('commons.wikimedia.org'), commons], [(u) => u.includes('de.wikipedia.org'), real]]);
+  const p = await PH.lookupPhoto({ title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna' }, { fetchFn });
+  assert.equal(p.title, 'Wiener Karlskirche');
+  assert.equal(p.thumbUrl, 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/39/Karlskirche_Abendsonne_1.jpg/330px-Karlskirche_Abendsonne_1.jpg');
+  assert.equal(p.artist, 'Thomas Ledl');
+});
+
+test('「Hofburg / Heldenplatz」拆成多個名稱搜尋與比對', () => {
+  assert.deepEqual(PH.nameVariants('Hofburg / Heldenplatz'), ['Hofburg / Heldenplatz', 'Hofburg', 'Heldenplatz']);
+  const stop = { title: '霍夫堡／英雄廣場', localName: 'Hofburg / Heldenplatz', city: 'Vienna' };
+  const plans = PH.searchPlans(stop).map((x) => `${x.lang}:${x.q}`);
+  assert.ok(plans.includes('de:Hofburg') && plans.includes('de:Heldenplatz'), plans.join());
+  assert.equal(PH.pickBestPage([page('Heldenplatz', null, null)], stop).page.title, 'Heldenplatz');
+});

@@ -1,12 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.6.0';
-import * as DB from './db.js?v=1.6.0';
-import * as V from './csv.js?v=1.6.0';
-import * as X from './xlsx.js?v=1.6.0';
-import * as PH from './photos.js?v=1.6.0';
-import * as IM from './images.js?v=1.6.0';
+import * as C from './core.js?v=1.6.1';
+import * as DB from './db.js?v=1.6.1';
+import * as V from './csv.js?v=1.6.1';
+import * as X from './xlsx.js?v=1.6.1';
+import * as PH from './photos.js?v=1.6.1';
+import * as IM from './images.js?v=1.6.1';
 
-export const APP_VERSION = '1.6.0';
+export const APP_VERSION = '1.6.1';
 
 // ---------- 狀態 ----------
 const state = {
