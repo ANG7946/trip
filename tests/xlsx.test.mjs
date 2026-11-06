@@ -64,3 +64,15 @@ test('壞檔回報錯誤', async () => {
   const broken = load('../data/trip-template.xlsx').slice(0, 2000);
   await assert.rejects(() => X.readXlsx(broken));
 });
+
+test('命名空間前綴（Open XML SDK／部分 AI 工具產生的 <x:row>、<x:c>）、絕對路徑、行內字串', async () => {
+  const { table, sheetName } = await X.readXlsx(load('./fixtures/prefixed-openxml-sdk.xlsx'));
+  assert.equal(sheetName, '行程');
+  const r = V.tableToDrafts(table, { source: 'xlsx' });
+  assert.equal(r.ok, true, r.errors.join('\n'));
+  assert.equal(r.rows.length, 2);
+  assert.equal(r.rows[0].startTime, '10:00');
+  assert.equal(r.rows[0].address, 'Karlsplatz, 1040 Wien');
+  assert.equal(r.rows[1].title, '漁人堡 & 城堡');
+  assert.equal(r.rows[1].date, null);
+});

@@ -54,6 +54,9 @@ function listZip(bytes) {
 }
 
 // ---------- XML 小工具 ----------
+// 標籤可能帶命名空間前綴（例如 Open XML SDK 產生的 <x:row>、<x:c>），一律接受
+const P = '(?:[A-Za-z_][\\w.-]*:)?';
+
 function decodeXml(s) {
   return s
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
@@ -70,7 +73,7 @@ function attr(tag, name) {
 /** 取出一段 XML 內所有 <t> 文字並串接（處理 rich text 的多個 <r>） */
 function allText(xml) {
   let out = '';
-  const re = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>|<t(?:\s[^>]*)?\/>/g;
+  const re = new RegExp(`<${P}t(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${P}t>|<${P}t(?:\\s[^>]*)?\\/>`, 'g');
   let m;
   while ((m = re.exec(xml))) out += m[1] ? decodeXml(m[1]) : '';
   return out;
@@ -90,11 +93,11 @@ async function listSheets(zip) {
   const rels = await zip.read('xl/_rels/workbook.xml.rels');
   if (!wb || !rels) throw new Error('不是有效的 Excel 檔（缺少 workbook）');
   const relMap = new Map();
-  for (const m of rels.matchAll(/<Relationship\b[^>]*>/g)) {
+  for (const m of rels.matchAll(new RegExp(`<${P}Relationship\\b[^>]*>`, 'g'))) {
     relMap.set(attr(m[0], 'Id'), attr(m[0], 'Target'));
   }
   const sheets = [];
-  for (const m of wb.matchAll(/<sheet\b[^>]*>/g)) {
+  for (const m of wb.matchAll(new RegExp(`<${P}sheet\\b[^>]*>`, 'g'))) {
     const name = attr(m[0], 'name');
     const rid = attr(m[0], 'r:id');
     let target = relMap.get(rid) || '';
@@ -107,7 +110,7 @@ async function listSheets(zip) {
 async function sharedStrings(zip) {
   const xml = await zip.read('xl/sharedStrings.xml');
   if (!xml) return [];
-  return [...xml.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => allText(m[1]));
+  return [...xml.matchAll(new RegExp(`<${P}si(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${P}si>`, 'g'))].map((m) => allText(m[1]));
 }
 
 /**
@@ -127,20 +130,23 @@ export async function readXlsx(buffer, { preferSheet = '行程' } = {}) {
   const ss = await sharedStrings(zip);
 
   const table = [];
-  for (const rm of xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>|<row\b([^>]*)\/>/g)) {
-    const rowAttrs = rm[1] || rm[3] || '';
+  const rowRe = new RegExp(`<${P}row\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/${P}row>)`, 'g');
+  const cellRe = new RegExp(`<${P}c\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/${P}c>)`, 'g');
+  const valueRe = new RegExp(`<${P}v(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${P}v>`);
+  for (const rm of xml.matchAll(rowRe)) {
+    const rowAttrs = rm[1] || '';
     const rIdx = Number(attr(`<row${rowAttrs}>`, 'r')) - 1;
     const row = [];
     const body = rm[2] || '';
     let autoCol = 0;
-    for (const cm of body.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+    for (const cm of body.matchAll(cellRe)) {
       const tag = `<c${cm[1]}>`;
       const ref = attr(tag, 'r');
       const ci = ref ? colIndex(ref) : autoCol;
       autoCol = ci + 1;
       const t = attr(tag, 't');
       const inner = cm[2] || '';
-      const v = (inner.match(/<v>([\s\S]*?)<\/v>/) || [])[1];
+      const v = (inner.match(valueRe) || [])[1];
       let val = '';
       if (t === 's') val = ss[Number(v)] ?? '';
       else if (t === 'inlineStr') val = allText(inner);
