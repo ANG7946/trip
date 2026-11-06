@@ -47,17 +47,57 @@ function pageCoords(page) {
  * 依名稱與距離為候選條目評分，挑出最合適者。
  * 回傳 { page, confidence: 'high'|'medium'|'low' } 或 null。
  */
+// 比對時忽略的通用字（避免「某某博物館」與「另一間博物館」被當成同一個地方）
+const GENERIC_WORDS = new Set([
+  'the', 'and', 'of', 'von', 'der', 'die', 'das', 'und', 'zum', 'zur', 'am', 'im', 'an', 'es', 'az', 'a',
+  'museum', 'muzeum', 'muzeum', 'church', 'kirche', 'templom', 'kostol', 'chapel', 'kapelle',
+  'palace', 'palais', 'palota', 'palac', 'schloss', 'castle', 'hrad', 'var', 'burg', 'fortress',
+  'park', 'garden', 'garten', 'hotel', 'restaurant', 'cafe', 'kaffeehaus', 'bar', 'station', 'bahnhof',
+  'hauptbahnhof', 'railway', 'square', 'platz', 'ter', 'namestie', 'street', 'strasse', 'gasse', 'utca', 'ut', 'ulica',
+  'bridge', 'brucke', 'hid', 'most', 'cathedral', 'dom', 'kathedrale', 'bazilika', 'basilica', 'gallery', 'galerie',
+  'national', 'nemzeti', 'city', 'old', 'new', 'upper', 'lower', 'obere', 'untere', 'great', 'grand',
+  'vienna', 'wien', 'budapest', 'bratislava', 'pozsony', 'austria', 'hungary', 'slovakia',
+]);
+
+function tokens(n) {
+  return n.split(' ').filter((w) => w.length >= 4 && !GENERIC_WORDS.has(w));
+}
+
+/** 名稱是否吻合：'exact' | 'partial' | null */
+export function nameMatchKind(names, pageTitle) {
+  const t = normName(pageTitle);
+  if (!t) return null;
+  if (names.some((n) => n === t)) return 'exact';
+  // 一方包含另一方（中文等無空格語言，或 "Karlskirche" vs "Karlskirche Wien"）
+  const meaningful = (x) => /[^\x00-\x7f]/.test(x) ? x.length >= 2 : tokens(x).length > 0;
+  if (names.some((n) => {
+    if (n.length < 2 || !(t.includes(n) || n.includes(t))) return false;
+    const shorter = n.length <= t.length ? n : t; // 被包含的一方必須有實質內容，不能只是「museum」這類通用字
+    return meaningful(shorter);
+  })) return 'partial';
+  // 共同的關鍵字（"Schloss Belvedere" vs "Belvedere, Vienna"）
+  const tt = new Set(tokens(t));
+  if (names.some((n) => tokens(n).some((w) => tt.has(w)))) return 'partial';
+  return null;
+}
+
+/**
+ * 為候選條目評分，挑出最合適者。寧缺勿濫：名稱必須吻合才採用。
+ * 回傳 { page, confidence: 'high'|'medium', nameMatch: true } 或 null。
+ */
 export function pickBestPage(pages, stop, { rejected = [] } = {}) {
   const names = [stop.localName, stop.title].filter(Boolean).map(normName).filter(Boolean);
+  const cityNames = new Set([normName(stop.city)].filter(Boolean));
   const here = stopCoords(stop);
   const scored = [];
   for (const p of pages || []) {
     if (!p || !p.thumbnail || !p.thumbnail.source || !p.pageimage) continue;
     if (rejected.includes(p.title)) continue;
     const t = normName(p.title);
-    let score = 0;
-    let nameMatch = false;
-    if (names.some((n) => n === t)) { score += 3; nameMatch = true; } else if (names.some((n) => n.length >= 4 && (t.includes(n) || n.includes(t)))) { score += 2; nameMatch = true; }
+    if (cityNames.has(t) || GENERIC_WORDS.has(t)) continue; // 整個城市的條目不算
+    const kind = nameMatchKind(names, p.title);
+    if (!kind) continue;
+    let score = kind === 'exact' ? 3 : 2;
     const there = pageCoords(p);
     let dist = null;
     if (here && there) {
@@ -67,14 +107,39 @@ export function pickBestPage(pages, stop, { rejected = [] } = {}) {
       else if (dist <= 1500) score += 1;
       else if (dist > 15000) score -= 2;
     }
-    scored.push({ page: p, score, dist, nameMatch, index: p.index ?? 999 });
+    scored.push({ page: p, score, dist, index: p.index ?? 999 });
   }
   if (!scored.length) return null;
   scored.sort((a, b) => (b.score - a.score) || (a.index - b.index) || ((a.dist ?? 1e9) - (b.dist ?? 1e9)));
   const best = scored[0];
-  const confidence = best.score >= 4 ? 'high' : best.score >= 2 ? 'medium' : 'low';
-  if (best.score < 0) return null;
-  return { page: best.page, confidence, nameMatch: best.nameMatch };
+  if (best.score < 1) return null;
+  return { page: best.page, confidence: best.score >= 4 ? 'high' : 'medium', nameMatch: true };
+}
+
+// ---------- 當地語言 ----------
+const LANG_BY_CITY = {
+  vienna: 'de', wien: 'de', salzburg: 'de', innsbruck: 'de', graz: 'de', hallstatt: 'de', berlin: 'de', munich: 'de', munchen: 'de',
+  budapest: 'hu', szentendre: 'hu', eger: 'hu',
+  bratislava: 'sk', pozsony: 'sk', kosice: 'sk',
+  prague: 'cs', praha: 'cs', 'cesky krumlov': 'cs', brno: 'cs',
+  paris: 'fr', lyon: 'fr', rome: 'it', roma: 'it', florence: 'it', firenze: 'it', venice: 'it', venezia: 'it', milan: 'it', milano: 'it',
+  madrid: 'es', barcelona: 'es', seville: 'es', sevilla: 'es', lisbon: 'pt', lisboa: 'pt', porto: 'pt',
+  amsterdam: 'nl', brussels: 'nl', krakow: 'pl', warsaw: 'pl', warszawa: 'pl', ljubljana: 'sl', zagreb: 'hr',
+  tokyo: 'ja', kyoto: 'ja', osaka: 'ja', nara: 'ja', seoul: 'ko', busan: 'ko', taipei: 'zh', tainan: 'zh', kaohsiung: 'zh',
+};
+
+/** 依城市（其次依原文特殊字母）推測當地語言的維基百科；無法判斷時回傳 null */
+export function localLang(stop) {
+  const city = normName(stop.city);
+  if (city && LANG_BY_CITY[city]) return LANG_BY_CITY[city];
+  const local = String(stop.localName || '');
+  if (/[őűŐŰ]/.test(local)) return 'hu';
+  if (/[řůěŘŮĚ]/.test(local)) return 'cs';
+  if (/[ľĺŕôťďňĽĹŔÔŤĎŇ]/.test(local)) return 'sk';
+  if (/[ßäÄ]/.test(local)) return 'de';
+  if (/[぀-ヿ]/.test(local)) return 'ja';
+  if (/[가-힯]/.test(local)) return 'ko';
+  return null;
 }
 
 // ---------- API 網址 ----------
@@ -84,8 +149,8 @@ const COMMON_PARAMS = {
   colimit: 'max',
 };
 
-export function geoSearchUrl(coords) {
-  const u = new URL(wikiApi('en'));
+export function geoSearchUrl(coords, lang = 'en') {
+  const u = new URL(wikiApi(lang));
   Object.entries({ ...COMMON_PARAMS, generator: 'geosearch', ggscoord: `${coords.lat}|${coords.lng}`, ggsradius: '500', ggslimit: '10' })
     .forEach(([k, v]) => u.searchParams.set(k, v));
   return u.toString();
@@ -95,15 +160,18 @@ const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 
 /**
  * 名稱搜尋的嘗試順序（由精確到寬鬆）：
- *  1. 英文維基：當地名稱＋城市　2. 英文維基：當地名稱　3. 中文維基：中文名稱（＋城市）
+ *  1. 當地語言維基：原文名稱（例：德文維基 Schloss Belvedere）　2. 當地語言維基：原文＋城市
+ *  3. 英文維基：原文　4. 英文維基：原文＋城市　5. 中文維基：中文名稱
  */
 export function searchPlans(stop) {
   const plans = [];
   const local = (stop.localName || '').trim();
   const title = (stop.title || '').trim();
   const city = (stop.city || '').trim();
+  const ll = localLang(stop);
   const add = (lang, q) => { if (q && !plans.some((x) => x.lang === lang && x.q === q)) plans.push({ lang, q }); };
-  if (local) { add('en', [local, city].filter(Boolean).join(' ')); add('en', local); }
+  if (local && ll && ll !== 'en') { add(ll, local); add(ll, [local, city].filter(Boolean).join(' ')); }
+  if (local) { add('en', local); add('en', [local, city].filter(Boolean).join(' ')); }
   if (title && !CJK_RE.test(title)) { add('en', [title, city].filter(Boolean).join(' ')); add('en', title); }
   if (title && CJK_RE.test(title)) add('zh', title);
   return plans;
@@ -156,22 +224,35 @@ async function getJson(fetchFn, url) {
  */
 export async function lookupPhoto(stop, { fetchFn = fetch, rejected = [] } = {}) {
   let pick = null;
+  let lang = 'en';
+  let lastErr = null;
+  let anyOk = false;
   const here = stopCoords(stop);
   if (here) {
-    const geo = await getJson(fetchFn, geoSearchUrl(here));
-    const candidate = pickBestPage(geo?.query?.pages, stop, { rejected });
-    // 地理搜尋必須名稱也吻合才採用；否則改用名稱搜尋，避免抓到隔壁建築（例如漁人堡旁的馬加什教堂）
-    if (candidate && candidate.nameMatch) pick = candidate;
-  }
-  let lang = 'en';
-  if (!pick) {
-    for (const plan of searchPlans(stop)) {
-      const txt = await getJson(fetchFn, textSearchUrl(stop, plan));
-      const cand = pickBestPage(txt?.query?.pages, stop, { rejected });
-      if (cand) { pick = cand; lang = plan.lang; break; }
+    // 地理搜尋也必須名稱吻合才採用，避免抓到隔壁建築（例如漁人堡旁的馬加什教堂）
+    for (const gl of [...new Set([localLang(stop), 'en'].filter(Boolean))]) {
+      try {
+        const geo = await getJson(fetchFn, geoSearchUrl(here, gl));
+        anyOk = true;
+        const candidate = pickBestPage(geo?.query?.pages, stop, { rejected });
+        if (candidate) { pick = candidate; lang = gl; break; }
+      } catch (e) { lastErr = e; }
     }
   }
-  if (!pick) return null;
+  if (!pick) {
+    for (const plan of searchPlans(stop)) {
+      try {
+        const txt = await getJson(fetchFn, textSearchUrl(stop, plan));
+        anyOk = true;
+        const cand = pickBestPage(txt?.query?.pages, stop, { rejected });
+        if (cand) { pick = cand; lang = plan.lang; break; }
+      } catch (e) { lastErr = e; }
+    }
+  }
+  if (!pick) {
+    if (!anyOk && lastErr) throw lastErr; // 每次查詢都失敗：回報錯誤而非「找不到」
+    return null;
+  }
 
   const page = pick.page;
   let artist = '';

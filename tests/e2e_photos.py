@@ -16,12 +16,12 @@ PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAZAAAAEsCAIAAABi1XKVAAAECElEQVR4
 wiki_hits = []
 
 def page_for(q):
-    name = q.split(' ')[0] if q else ''
-    if not name or name.startswith('示範'):
+    # 模擬當地語言維基：以查詢字串為條目名稱（如德文維基的 "Schloss Belvedere"）
+    if not q or q.startswith('示範'):
         return {'query': {}}
-    t = name
+    t = q
     return {'query': {'pages': [{'title': t, 'index': 1, 'pageimage': f'{t}.jpg',
-        'thumbnail': {'source': f'https://upload.wikimedia.org/thumb/{t}.png', 'width': 400, 'height': 300}}]}}
+        'thumbnail': {'source': f'https://upload.wikimedia.org/thumb/{t.replace(" ", "_")}/330px-{t.replace(" ", "_")}.png', 'width': 330, 'height': 248}}]}}
 
 async def route_wiki(route):
     url = route.request.url

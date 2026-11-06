@@ -1,12 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.5.0';
-import * as DB from './db.js?v=1.5.0';
-import * as V from './csv.js?v=1.5.0';
-import * as X from './xlsx.js?v=1.5.0';
-import * as PH from './photos.js?v=1.5.0';
-import * as IM from './images.js?v=1.5.0';
+import * as C from './core.js?v=1.5.1';
+import * as DB from './db.js?v=1.5.1';
+import * as V from './csv.js?v=1.5.1';
+import * as X from './xlsx.js?v=1.5.1';
+import * as PH from './photos.js?v=1.5.1';
+import * as IM from './images.js?v=1.5.1';
 
-export const APP_VERSION = '1.5.0';
+export const APP_VERSION = '1.5.1';
 
 // ---------- 狀態 ----------
 const state = {
@@ -1069,8 +1069,9 @@ async function setPhotoPrefs(patch) {
 }
 
 /** 預先下載所有旅程的縮圖（建議在臺灣用 Wi‑Fi 執行）。 */
-async function prefetchPhotos() {
+async function prefetchPhotos({ redo = false } = {}) {
   if (state.photoJob && state.photoJob.running) return;
+  if (redo && !window.confirm('重新配對會清除所有維基百科照片並重新搜尋（您標記「不是這張」的仍會排除；自己的照片不受影響）。確定繼續？')) return;
   if (!navigator.onLine) { toast('目前沒有網路，請連上 Wi‑Fi 後再試', { duration: 4000 }); return; }
   const targets = [];
   for (const t of state.trips) for (const st of t.stops) {
@@ -1087,11 +1088,14 @@ async function prefetchPhotos() {
     let stage = '搜尋';
     try {
       let photo = st && st.photo;
+      const rejected = (photo && photo.rejected) || [];
+      if (redo && photo && !photo.hidden) photo = null;
       if (st && !photo) {
-        photo = await PH.lookupPhoto(st);
-        if (photo) {
+        photo = await PH.lookupPhoto(st, { rejected });
+        if (photo) photo.rejected = rejected;
+        if (photo || redo) {
           const t2 = state.trips.find((t) => t.tripId === tripId);
-          await commitTrip({ ...t2, stops: t2.stops.map((x) => (x.id === stopId ? { ...x, photo } : x)) }, { rerender: false });
+          await commitTrip({ ...t2, stops: t2.stops.map((x) => (x.id === stopId ? { ...x, photo: photo || null } : x)) }, { rerender: false });
         }
       }
       if (!photo) {
@@ -1154,7 +1158,8 @@ function photoSettingsCard() {
       h('div', { class: 'btn-row' },
         j && j.running
           ? btn('停止下載', () => { j.cancel = true; }, 'btn danger')
-          : btn('預先下載所有旅程的照片', prefetchPhotos, 'btn primary')),
+          : [btn('預先下載所有旅程的照片', () => prefetchPhotos(), 'btn primary'),
+            btn('重新配對全部', () => prefetchPhotos({ redo: true }), 'btn ghost')]),
       h('p', { class: 'sub', id: 'photo-progress', text: j && j.running ? `處理中 ${j.done}/${j.total}…` : '' }),
       photoJobReport(j),
       h('p', { class: 'hint', text: '建議出發前在 Wi‑Fi 下執行一次：照片會保存在手機中，之後離線或在國外都能看，不會用到國外流量。' }),

@@ -29,9 +29,10 @@ test('配對：沒有縮圖或非自由授權（無 pageimage）的條目不採�
   const stop = { title: 'X', localName: 'Stephansdom', city: 'Vienna' };
   const noThumb = { title: 'Stephansdom', index: 1 };
   assert.equal(PH.pickBestPage([noThumb], stop), null);
-  const r = PH.pickBestPage([page('Stephansdom', null, null), page('St. Stephen Cathedral', null, null, { index: 2 })], stop, { rejected: ['Stephansdom'] });
-  assert.equal(r.page.title, 'St. Stephen Cathedral');
-  assert.equal(r.confidence, 'low');
+  const r = PH.pickBestPage([page('Stephansdom', null, null), page('Stephansdom (Wien)', null, null, { index: 2 })], stop, { rejected: ['Stephansdom'] });
+  assert.equal(r.page.title, 'Stephansdom (Wien)');
+  // 名稱不吻合者寧缺勿濫
+  assert.equal(PH.pickBestPage([page('St. Stephen Cathedral', null, null)], stop), null);
 });
 
 test('API 網址：geosearch 座標順序、origin=*、僅自由授權', () => {
@@ -41,7 +42,8 @@ test('API 網址：geosearch 座標順序、origin=*、僅自由授權', () => {
   assert.equal(g.searchParams.get('origin'), '*');
   assert.equal(g.searchParams.get('pilicense'), 'free');
   const s = new URL(PH.textSearchUrl({ title: '漁人堡', localName: 'Halászbástya', city: 'Budapest' }));
-  assert.equal(s.searchParams.get('gsrsearch'), 'Halászbástya Budapest');
+  assert.equal(s.hostname, 'hu.wikipedia.org', '布達佩斯優先查匈牙利文維基');
+  assert.equal(s.searchParams.get('gsrsearch'), 'Halászbástya');
 });
 
 test('只接受 upload.wikimedia.org 的 https 圖片', () => {
@@ -71,6 +73,7 @@ test('lookupPhoto：座標優先；地理搜尋名稱不符時改用名稱搜尋
   const stop = { title: '漁人堡', localName: 'Halászbástya', city: 'Budapest', coordinates: { lat: 47.5022, lng: 19.0348 } };
   const fetchFn = mockFetch([
     [(u) => u.includes('generator=geosearch'), { query: { pages: [page('Matthias Church', 47.5019, 19.0342)] } }],
+    [(u) => u.includes('hu.wikipedia.org') && u.includes('generator=search'), { query: { pages: [page('Halászbástya', 47.5021, 19.0349, { index: 1 })] } }],
     [(u) => u.includes('generator=search'), { query: { pages: [page("Fisherman's Bastion", 47.5021, 19.0349, { index: 1 })] } }],
     [(u) => u.includes('commons.wikimedia.org'), { query: { pages: [{ imageinfo: [{
       thumburl: 'https://upload.wikimedia.org/thumb/fb-400.jpg', descriptionurl: 'https://commons.wikimedia.org/wiki/File:FB.jpg',
@@ -78,7 +81,10 @@ test('lookupPhoto：座標優先；地理搜尋名稱不符時改用名稱搜尋
     }] }] } }],
   ]);
   const p = await PH.lookupPhoto(stop, { fetchFn });
-  assert.equal(p.title, "Fisherman's Bastion");
+  assert.equal(p.title, 'Halászbástya');
+  assert.equal(p.lang, 'hu');
+  assert.match(p.pageUrl, /^https:\/\/hu\.wikipedia\.org\//);
+  assert.equal(p.confidence, 'high', '名稱完全吻合且距離近');
   assert.equal(p.artist, 'Jane Doe');
   assert.equal(p.license, 'CC BY-SA 4.0');
   assert.equal(p.thumbUrl, 'https://upload.wikimedia.org/thumb/fb-400.jpg');
@@ -96,9 +102,11 @@ test('lookupPhoto：找不到時回傳 null；授權資訊失敗時仍保留來�
   assert.match(p.fileUrl, /^https:\/\/commons\.wikimedia\.org\/wiki\/File:/);
 });
 
-test('搜尋順序：當地名稱＋城市 → 當地名稱 → 中文維基（中文名稱）', () => {
+test('搜尋順序：當地語言維基原文 → 英文維基原文 → 中文維基', () => {
   const plans = PH.searchPlans({ title: '卡爾教堂', localName: 'Karlskirche', city: 'Vienna' });
-  assert.deepEqual(plans, [{ lang: 'en', q: 'Karlskirche Vienna' }, { lang: 'en', q: 'Karlskirche' }, { lang: 'zh', q: '卡爾教堂' }]);
+  assert.deepEqual(plans, [
+    { lang: 'de', q: 'Karlskirche' }, { lang: 'de', q: 'Karlskirche Vienna' },
+    { lang: 'en', q: 'Karlskirche' }, { lang: 'en', q: 'Karlskirche Vienna' }, { lang: 'zh', q: '卡爾教堂' }]);
   assert.deepEqual(PH.searchPlans({ title: 'Café Sacher', city: 'Vienna' }), [{ lang: 'en', q: 'Café Sacher Vienna' }, { lang: 'en', q: 'Café Sacher' }]);
   assert.equal(new URL(PH.textSearchUrl({}, { lang: 'zh', q: '漁人堡' })).hostname, 'zh.wikipedia.org');
 });
@@ -136,4 +144,29 @@ test('下載：429 時稍候重試，仍失敗改用 250px；404 不重試', asy
   await assert.rejects(() => PH.downloadToCache(url, async (u) => { seen404.push(u); return { ok: false, status: 404 }; }, { wait: async () => {} }), /HTTP 404/);
   assert.equal(seen404.length, 1);
   delete globalThis.caches;
+});
+
+test('當地語言判斷：依城市，其次依原文特殊字母', () => {
+  assert.equal(PH.localLang({ city: 'Wien' }), 'de');
+  assert.equal(PH.localLang({ city: 'Budapest' }), 'hu');
+  assert.equal(PH.localLang({ city: 'Bratislava' }), 'sk');
+  assert.equal(PH.localLang({ city: '', localName: 'Szépművészeti Múzeum' }), 'hu');
+  assert.equal(PH.localLang({ city: 'Somewhere', localName: 'Plain Name' }), null);
+});
+
+test('寧缺勿濫：關鍵字吻合可配；城市條目、通用字（museum）不配', () => {
+  const belv = { title: '美景宮', localName: 'Schloss Belvedere', city: 'Vienna' };
+  assert.equal(PH.pickBestPage([page('Belvedere, Vienna', null, null)], belv).page.title, 'Belvedere, Vienna');
+  const cafe = { title: '某咖啡館', localName: 'Café Prückel', city: 'Vienna' };
+  assert.equal(PH.pickBestPage([page('Vienna', null, null)], cafe), null, '不可用城市條目充數');
+  const leo = { title: '利奧波德博物館', localName: 'Leopold Museum', city: 'Vienna' };
+  assert.equal(PH.pickBestPage([page('Museum of Fine Arts', null, null)], leo), null, '只有 museum 相同不算');
+  assert.equal(PH.pickBestPage([page('Leopold Museum', null, null)], leo).confidence, 'medium');
+  const zh = { title: '漁人堡', city: 'Budapest' };
+  assert.equal(PH.pickBestPage([page('漁人堡', null, null)], zh).page.title, '漁人堡');
+});
+
+test('某語言查詢失敗（例如 404）時繼續嘗試其他語言；全部失敗才回報錯誤', async () => {
+  const errOnly = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  await assert.rejects(() => PH.lookupPhoto({ title: 'X', localName: 'Karlskirche', city: 'Vienna' }, { fetchFn: errOnly }), /HTTP 503/);
 });
