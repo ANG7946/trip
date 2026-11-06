@@ -1,9 +1,9 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.1.3';
-import * as DB from './db.js?v=1.1.3';
-import * as V from './csv.js?v=1.1.3';
+import * as C from './core.js?v=1.2.0';
+import * as DB from './db.js?v=1.2.0';
+import * as V from './csv.js?v=1.2.0';
 
-export const APP_VERSION = '1.1.3';
+export const APP_VERSION = '1.2.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -21,6 +21,7 @@ const state = {
   persisted: null,
   updateReady: null,
   route: { name: 'today', arg: null },
+  mapPrefs: { provider: 'apple', appleStyle: 'unified' }, // 本機設定，所有旅程共用
 };
 
 const main = () => document.getElementById('main');
@@ -174,7 +175,7 @@ function render() {
   renderTabBar();
 
   let view;
-  if (!trip && !['tripform', 'trips', 'import', 'settings', 'maptest', 'guide', 'paste'].includes(state.route.name)) {
+  if (!trip && !['tripform', 'trips', 'import', 'settings', 'app', 'maptest', 'guide', 'paste'].includes(state.route.name)) {
     view = viewWelcome();
   } else {
     switch (state.route.name) {
@@ -188,6 +189,7 @@ function render() {
       case 'import': view = viewImport(); break;
       case 'maptest': view = viewMapTest(trip); break;
       case 'guide': view = viewGuide(); break;
+      case 'app': view = viewAppSettings(); break;
       case 'paste': view = viewPaste(); break;
       default: view = viewToday(trip);
     }
@@ -218,17 +220,18 @@ function renderTabBar() {
     ['today', '今天', '#today'],
     ['dates', '全部日期', '#dates'],
     ['edit', '編輯行程', '#edit'],
-    ['settings', '設定／備份', '#settings'],
+    ['settings', '旅程設定', '#settings'],
   ];
   const nav = document.getElementById('tabbar');
   // 分頁都是針對「目前旅程」；在旅程列表或尚無旅程時隱藏，避免誤入上次使用的旅程
-  const hide = r === 'trips' || !activeTrip();
+  const standalonePages = ['trips', 'app', 'guide', 'paste', 'import', 'maptest'];
+  const hide = standalonePages.includes(r) || (r === 'tripform' && state.route.arg === 'new') || !activeTrip();
   nav.hidden = hide;
   document.body.classList.toggle('no-tabbar', hide);
   if (hide) { nav.replaceChildren(); return; }
   nav.replaceChildren(...tabs.map(([name, label, href]) => {
     const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
-      || (name === 'settings' && ['tripform', 'import', 'maptest', 'guide', 'paste'].includes(r));
+      || (name === 'settings' && r === 'tripform');
     return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
   }));
 }
@@ -267,10 +270,10 @@ function dayHeader(trip, { title } = {}) {
 
 // ---------- 導航按鈕 ----------
 function mapOpts(trip) {
-  return { provider: trip.settings.mapProvider || 'apple', appleStyle: trip.settings.appleLinkStyle || 'unified' };
+  return { provider: state.mapPrefs.provider, appleStyle: state.mapPrefs.appleStyle };
 }
 function providerName(trip) {
-  return (trip.settings.mapProvider || 'apple') === 'google' ? 'Google 地圖' : 'Apple Maps';
+  return state.mapPrefs.provider === 'google' ? 'Google 地圖' : 'Apple Maps';
 }
 
 function navButton(trip, stop, { big = false } = {}) {
@@ -329,7 +332,7 @@ function stopNames(stop) {
 }
 
 function fallbackActions(trip, stop) {
-  const placeUrl = C.buildPlaceUrl(stop, { provider: trip.settings.mapProvider || 'apple' });
+  const placeUrl = C.buildPlaceUrl(stop, { provider: state.mapPrefs.provider });
   const text = C.copyableLocation(stop);
   return h('div', { class: 'fallback-row' },
     btn('複製地址／座標', async () => {
@@ -388,7 +391,7 @@ function viewToday(trip) {
     wrap.appendChild(h('section', { class: 'all-done' },
       h('h2', { text: '本日所有行程已處理' }),
       h('p', { text: `完成 ${p.completed} 項，略過 ${p.skipped} 項。` }),
-      h('p', { class: 'hint', text: '若當日行程結束，建議到「設定／備份」匯出一次備份。' })));
+      h('p', { class: 'hint', text: '若當日行程結束，建議到「旅程設定」按「立即完整備份」。' })));
   }
 
   // 提醒放在下一站之後，讓主要導航按鈕維持在畫面上方
@@ -466,7 +469,7 @@ function onboardingCard() {
   const items = [];
   if (!isStandalone()) items.push('用 Safari 開啟本頁 → 分享 → 「加入主畫面」，之後一律從主畫面圖示開啟（主畫面 App 與 Safari 的資料可能分開保存）。');
   items.push('出發前請先在 Apple Maps 下載各城市的離線地圖（設定在 Apple Maps 內，本網頁無法代勞）。');
-  items.push('資料只存在這支手機。請在出發前與每天結束後，到「設定／備份」匯出備份。');
+  items.push('資料只存在這支手機。請在出發前與每天結束後，到「旅程設定」或首頁的「App 設定／備份」匯出備份。');
   items.push('開啟地圖不會自動標記完成；到達或放棄後，請回到這裡手動標記。');
   return h('section', { class: 'onboarding' },
     h('h2', { text: '使用前提醒' }),
@@ -735,49 +738,67 @@ function viewStopForm(trip, stopId, newDateArg) {
 }
 
 // ---------- 設定／備份 ----------
+function backLink(label = '‹ 我的旅程', href = '#trips') {
+  return h('a', { class: 'trip-switch', href },
+    h('span', { class: 'trip-switch-home', text: label }));
+}
+
+// 旅程設定（只針對目前旅程；保留底部分頁）
 function viewSettings(trip) {
+  if (!trip) return viewAppSettings();
+  return h('div', { class: 'view settings-view' },
+    h('header', { class: 'page-header' }, tripSwitch(trip.title), h('h1', { text: '旅程設定' })),
+    h('section', { class: 'card' },
+      h('h2', { text: '旅程資訊' }),
+      h('p', { class: 'big-line', text: trip.title }),
+      h('p', { class: 'sub', text: `${trip.startDate} – ${trip.endDate}・時區 ${trip.timeZone}・預設${C.MODE_LABELS[trip.settings.defaultMode]}` }),
+      h('a', { class: 'btn ghost', href: '#tripform/edit' }, '編輯名稱、日期與時區')),
+    h('section', { class: 'card' },
+      h('h2', { text: '分享這趟行程' }),
+      h('p', { class: 'hint', text: '產生不含完成紀錄與備註的檔案，朋友匯入後即可使用。若含住宿等私人地點，請先確認是否適合分享。' }),
+      btn('匯出分享範本', () => exportTemplate(trip), 'btn')),
+    h('section', { class: 'card' },
+      h('h2', { text: '備份、地圖與 App 設定' }),
+      h('p', { class: 'hint', text: state.lastExportAt ? `上次完整備份：${formatLocalTime(state.lastExportAt, trip.timeZone)}` : '尚未匯出過完整備份。' }),
+      h('div', { class: 'btn-row' },
+        btn('立即完整備份', () => exportBackup(), 'btn primary'),
+        h('a', { class: 'btn ghost', href: '#app' }, '前往 App 設定／備份'))),
+    h('section', { class: 'card danger-zone' },
+      h('h2', { text: '刪除旅程' }),
+      h('p', { class: 'hint', text: '會刪除此旅程的所有停靠點與紀錄。建議先匯出備份。' }),
+      btn(`刪除「${trip.title}」`, () => removeTrip(trip), 'btn danger')));
+}
+
+// App 設定／備份（跨所有旅程；不顯示底部分頁）
+function viewAppSettings() {
   const fileInput = h('input', {
     type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'import-file',
     on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) },
   });
-
+  const mp = state.mapPrefs;
   const sections = [];
-  if (trip) {
-    sections.push(h('section', { class: 'card' },
-      h('h2', { text: '目前旅程' }),
-      h('p', { class: 'big-line', text: trip.title }),
-      h('p', { class: 'sub', text: `${trip.startDate} – ${trip.endDate}・時區 ${trip.timeZone}` }),
-      h('div', { class: 'btn-row' },
-        h('a', { class: 'btn ghost', href: '#tripform/edit' }, '編輯旅程資訊'),
-        h('a', { class: 'btn ghost', href: '#trips' }, `我的旅程（共 ${state.trips.length}）`))));
-
-    sections.push(h('section', { class: 'card' },
-      h('h2', { text: '地圖' }),
-      field('預設地圖 App', h('select', {
-        on: { change: (e) => commitTrip({ ...trip, settings: { ...trip.settings, mapProvider: e.target.value } }) },
-      },
-      h('option', { value: 'apple', selected: trip.settings.mapProvider !== 'google' }, 'Apple Maps（建議 iPhone 使用）'),
-      h('option', { value: 'google', selected: trip.settings.mapProvider === 'google' }, 'Google 地圖（Android 或需要時）'))),
-      (trip.settings.mapProvider || 'apple') === 'apple' ? field('Apple Maps 連結格式', h('select', {
-        on: { change: (e) => commitTrip({ ...trip, settings: { ...trip.settings, appleLinkStyle: e.target.value } }) },
-      },
-      h('option', { value: 'unified', selected: (trip.settings.appleLinkStyle || 'unified') === 'unified' }, '官方統一網址（iOS 18.4 以上，預設）'),
-      h('option', { value: 'legacy', selected: trip.settings.appleLinkStyle === 'legacy' }, '舊式網址（相容性備援，無自行車）'),
-      h('option', { value: 'scheme', selected: trip.settings.appleLinkStyle === 'scheme' }, 'maps:// 直接開啟 App（若連結停留在網頁內時使用）')),
-      '請先用「導航測試」確認哪一種在您的 iPhone 上能直接跳到 Apple Maps。') : null,
-      h('a', { class: 'btn', href: '#maptest' }, '導航測試（實機驗證用）')));
-  }
 
   sections.push(h('section', { class: 'card' },
-    h('h2', { text: '備份與還原' }),
-    h('p', { class: 'sub', text: state.lastExportAt ? `上次成功匯出：${formatLocalTime(state.lastExportAt, trip ? trip.timeZone : undefined)}` : '尚未匯出過備份' }),
+    h('h2', { text: '備份與還原（所有旅程）' }),
+    h('p', { class: 'sub', text: state.lastExportAt ? `上次成功匯出：${formatLocalTime(state.lastExportAt)}` : '尚未匯出過備份' }),
     h('p', { class: 'hint', text: '資料只保存在這支手機的這個 App 中，可能因清除網站資料或系統清理而消失。備份是必要的保險：建議出發前一次、每天結束後一次。備份檔含私人行程，請妥善保存。' }),
     h('div', { class: 'btn-row' },
       btn('匯出完整備份', () => exportBackup(), 'btn primary', { disabled: !state.trips.length }),
-      trip ? btn('匯出分享範本（不含完成紀錄與備註）', () => exportTemplate(trip), 'btn ghost') : null,
       h('label', { class: 'btn ghost', for: 'import-file', role: 'button', tabindex: '0' }, '匯入檔案（JSON／CSV）…'),
       h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容'),
       fileInput)));
+
+  sections.push(h('section', { class: 'card' },
+    h('h2', { text: '地圖（本機設定，所有旅程共用）' }),
+    field('預設地圖 App', h('select', { on: { change: (e) => setMapPrefs({ provider: e.target.value }) } },
+      h('option', { value: 'apple', selected: mp.provider !== 'google' }, 'Apple Maps（建議 iPhone 使用）'),
+      h('option', { value: 'google', selected: mp.provider === 'google' }, 'Google 地圖（Android 或需要時）'))),
+    mp.provider !== 'google' ? field('Apple Maps 連結格式', h('select', { on: { change: (e) => setMapPrefs({ appleStyle: e.target.value }) } },
+      h('option', { value: 'unified', selected: mp.appleStyle === 'unified' }, '官方統一網址（iOS 18.4 以上，預設）'),
+      h('option', { value: 'legacy', selected: mp.appleStyle === 'legacy' }, '舊式網址（相容性備援，無自行車）'),
+      h('option', { value: 'scheme', selected: mp.appleStyle === 'scheme' }, 'maps:// 直接開啟 App（若連結停留在網頁內時使用）')),
+    '請先用「導航測試」確認哪一種在您的 iPhone 上能直接跳到 Apple Maps。') : null,
+    h('a', { class: 'btn', href: '#maptest' }, '導航測試（實機驗證用）')));
 
   sections.push(h('section', { class: 'card' },
     h('h2', { text: '建立行程檔（自己用或分享給朋友）' }),
@@ -798,18 +819,24 @@ function viewSettings(trip) {
     state.onboardingDismissed ? btn('重新顯示使用前提醒', async () => {
       state.onboardingDismissed = false;
       await DB.setMeta('onboardingDismissed', false).catch(() => {});
-      go('#today');
+      toast('進入旅程時會再顯示使用前提醒', { duration: 3000 });
     }, 'btn ghost small') : null));
 
-  if (trip) {
-    sections.push(h('section', { class: 'card danger-zone' },
-      h('h2', { text: '刪除旅程' }),
-      h('p', { class: 'hint', text: '會刪除此旅程的所有停靠點與紀錄。建議先匯出備份。' }),
-      btn(`刪除「${trip.title}」`, () => removeTrip(trip), 'btn danger')));
-  }
-
   sections.push(h('p', { class: 'version', text: `旅程導航助手 v${APP_VERSION}・資料格式 v${C.SCHEMA_VERSION}・無帳號、無追蹤、資料不離開手機` }));
-  return h('div', { class: 'view settings-view' }, h('header', { class: 'page-header' }, h('h1', { text: '設定／備份' })), sections);
+  return h('div', { class: 'view settings-view' },
+    h('header', { class: 'page-header' }, backLink(), h('h1', { text: 'App 設定／備份' })), sections);
+}
+
+async function setMapPrefs(patch) {
+  const next = { ...state.mapPrefs, ...patch };
+  try {
+    await DB.setMeta('mapPrefs', next);
+  } catch (e) {
+    toast(`儲存失敗：${e.message || e}`, { kind: 'error' });
+    return;
+  }
+  state.mapPrefs = next;
+  render();
 }
 
 // ---------- 匯出 ----------
@@ -888,9 +915,9 @@ async function handleImportFile(file, inputEl) {
 function viewImport() {
   const pi = state.pendingImport;
   if (!pi) {
-    return h('div', { class: 'view' }, h('p', { text: '沒有待匯入的檔案。' }), h('a', { class: 'btn', href: '#settings' }, '回到設定'));
+    return h('div', { class: 'view' }, h('p', { text: '沒有待匯入的檔案。' }), h('a', { class: 'btn', href: '#app' }, '回到 App 設定'));
   }
-  const cancel = () => { state.pendingImport = null; go('#settings'); };
+  const cancel = () => { state.pendingImport = null; go(activeTrip() ? '#app' : '#trips'); };
   if (pi.kind === 'csv') return viewImportCsv(pi, cancel);
   if (!pi.ok) {
     return h('div', { class: 'view import-view' },
@@ -1065,7 +1092,7 @@ function viewPaste() {
     h('div', { class: 'form-actions' },
       btn('檢查並預覽', check, 'btn primary'),
       h('a', { class: 'btn ghost', href: '#guide' }, '查看說明'),
-      btn('取消', () => (history.length > 1 ? history.back() : go('#settings')), 'btn ghost')));
+      btn('取消', () => (history.length > 1 ? history.back() : go('#app')), 'btn ghost')));
 }
 
 // ---------- 說明：如何建立行程檔 ----------
@@ -1093,14 +1120,14 @@ function viewGuide() {
 
     h('section', { class: 'card' },
       h('h2', { text: '方式一：在 App 內逐筆新增' }),
-      h('p', { text: '「設定／備份 → 切換或新增旅程 → 建立新旅程」，再到「編輯行程」按「新增停靠點」。適合停靠點不多、或臨時增加。' })),
+      h('p', { text: '在首頁「我的旅程」按「建立新旅程」，進入旅程後到「編輯行程」按「新增停靠點」。適合停靠點不多、或臨時增加。' })),
 
     h('section', { class: 'card' },
       h('h2', { text: '方式二：用試算表填寫（Excel／Numbers／Google 試算表）' }),
       h('ol', null,
         h('li', null, '下載 CSV 範本，用試算表開啟，保留第一列欄名，照範例填寫（範例列可刪除）。'),
         h('li', null, '另存為 CSV（Excel 請選「CSV UTF-8」；一般 CSV 也可以）。'),
-        h('li', null, '把檔案傳到手機，在 App「設定／備份 → 匯入檔案」選取；也可以直接在試算表選取整個表格複製，到「貼上行程內容」貼上。')),
+        h('li', null, '把檔案傳到手機，在首頁「我的旅程 → 匯入檔案」選取；也可以直接在試算表選取整個表格複製，到「貼上行程內容」貼上。')),
       h('a', { class: 'btn', href: './data/trip-template.csv', download: 'trip-template.csv' }, '下載 CSV 範本'),
       h('table', { class: 'col-table' },
         h('thead', null, h('tr', null, h('th', { text: '欄位' }), h('th', { text: '填寫方式' }))),
@@ -1129,8 +1156,8 @@ function viewGuide() {
     h('section', { class: 'card' },
       h('h2', { text: '分享給朋友' }),
       h('p', null, '請朋友用 iPhone Safari 開啟 ', h('strong', { text: appUrl }), '，加入主畫面後依上面任一方式建立行程。每個人的資料只在自己的手機裡，彼此看不到。'),
-      h('p', { class: 'hint', text: '若想把自己規劃好的行程給朋友參考，可到「設定／備份 → 匯出分享範本」，會移除完成紀錄與備註。Android 手機請在設定中把地圖改為 Google 地圖。' })),
-    h('a', { class: 'btn ghost', href: '#settings' }, '返回設定'));
+      h('p', { class: 'hint', text: '若想把自己規劃好的行程給朋友參考，可在該旅程的「旅程設定 → 匯出分享範本」，會移除完成紀錄與備註。Android 手機請到「App 設定／備份」把地圖改為 Google 地圖。' })),
+    btn('返回', () => (history.length > 1 ? history.back() : go('#trips')), 'btn ghost'));
 }
 
 // ---------- 旅程管理 ----------
@@ -1182,7 +1209,7 @@ function viewTrips() {
       h('p', { class: 'hint', text: state.lastExportAt ? `上次備份：${formatLocalTime(state.lastExportAt)}。完整備份包含所有旅程。` : '尚未備份。完整備份包含所有旅程。' }),
       h('div', { class: 'btn-row' },
         btn('匯出完整備份', () => exportBackup(), 'btn'),
-        h('a', { class: 'btn ghost', href: '#settings' }, '設定／備份'))) : null);
+        h('a', { class: 'btn ghost', href: '#app' }, '備份、地圖與 App 設定'))) : null);
 }
 
 function viewTripForm(trip) {
@@ -1270,7 +1297,8 @@ function viewWelcome() {
       h('a', { class: 'btn ghost', href: '#paste' }, '貼上行程內容（例如 AI 產生的 JSON）'),
       h('a', { class: 'btn ghost', href: '#guide' }, '如何建立行程檔？'),
       h('input', { type: 'file', accept: '.json,.csv,application/json,text/csv', class: 'visually-hidden', id: 'welcome-import', on: { change: (e) => handleImportFile(e.target.files && e.target.files[0], e.target) } }),
-      btn('先看看示範旅程', loadDemo, 'btn ghost')),
+      btn('先看看示範旅程', loadDemo, 'btn ghost'),
+      h('a', { class: 'btn ghost', href: '#app' }, 'App 設定與導航測試')),
     h('section', { class: 'card' },
       h('h2', { text: '開始之前' }),
       h('ul', null,
@@ -1325,7 +1353,7 @@ function viewMapTest(trip) {
     h('header', { class: 'page-header' }, h('h1', { text: '導航測試' })),
     h('p', { class: 'hint', text: '請在 iPhone 主畫面 App 中逐一點擊，記錄：是否直接切到地圖 App、目的地是否正確、交通方式是否正確、返回後本頁是否還在。若官方統一網址停留在網頁內，請到設定改用「maps:// 直接開啟 App」。' }),
     rows,
-    trip ? h('a', { class: 'btn ghost', href: '#settings' }, '返回設定') : h('a', { class: 'btn ghost', href: '#' }, '返回'));
+    h('a', { class: 'btn ghost', href: '#app' }, '返回 App 設定'));
 }
 
 // ---------- 啟動 ----------
@@ -1378,6 +1406,8 @@ async function init() {
     state.trips = await DB.getAllTrips();
     state.lastExportAt = await DB.getMeta('lastExportAt', null);
     state.onboardingDismissed = await DB.getMeta('onboardingDismissed', false);
+    const savedMap = await DB.getMeta('mapPrefs', null);
+    if (savedMap) state.mapPrefs = { ...state.mapPrefs, ...savedMap };
     const savedActive = await DB.getMeta('activeTripId', null);
     const session = await DB.getMeta('session', null);
     const activeId = state.trips.some((t) => t.tripId === savedActive) ? savedActive : (state.trips[0] && state.trips[0].tripId);

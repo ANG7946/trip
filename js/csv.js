@@ -1,5 +1,5 @@
 // csv.js — CSV（Excel／Numbers／Google 試算表）匯入與範本
-import * as C from './core.js?v=1.1.3';
+import * as C from './core.js?v=1.2.0';
 
 // 欄位定義：key、範本欄名（中文）、可接受的別名
 export const CSV_COLUMNS = [

@@ -55,7 +55,7 @@ async def main():
         check('AI JSON 預設交通方式 transit', 'mode=transit' in href, href)
 
         # 匯入範本 CSV（建立新旅程）
-        await page.goto(BASE + '#settings'); await page.wait_for_selector('#import-file')
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
         await page.set_input_files('#import-file', csv_path)
         await page.wait_for_selector('.import-view')
         txt = await page.inner_text('.import-view')
@@ -68,7 +68,7 @@ async def main():
         # Big5 CSV 加入目前旅程
         big5 = os.path.join(tempfile.gettempdir(), 'big5-trip.csv')
         open(big5, 'wb').write('日期,名稱,城市,交通方式\r\n2026-11-12,自然史博物館,Vienna,步行\r\n2026-11-30,超出範圍,Vienna,步行\r\n'.encode('big5'))
-        await page.goto(BASE + '#settings'); await page.wait_for_selector('#import-file')
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
         await page.set_input_files('#import-file', big5); await page.wait_for_selector('.import-view')
         check('Big5 正確解碼', 'Big5' in await page.inner_text('.import-view') and '自然史博物館' in await page.inner_text('.import-view'))
         await page.click('button:has-text("加入「CSV 測試旅程」")')
@@ -86,7 +86,7 @@ async def main():
         # 錯誤 CSV
         bad = os.path.join(tempfile.gettempdir(), 'bad.csv')
         open(bad, 'w', encoding='utf-8').write('日期,地址\n2026-11-12,x\n')
-        await page.goto(BASE + '#settings'); await page.wait_for_selector('#import-file')
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
         await page.set_input_files('#import-file', bad); await page.wait_for_selector('.import-view')
         check('缺名稱欄的 CSV 被拒', '無法匯入 CSV' in await page.inner_text('.import-view h1'))
 

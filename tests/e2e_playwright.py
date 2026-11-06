@@ -105,7 +105,11 @@ async def main():
         check('候選排入後當日 4 項', cnt == 4, str(cnt))
         await page.screenshot(path=f'{SHOTS}/05-edit.png', full_page=True)
         # 匯出（Chrome 無 share files → 下載）
-        await page.click('.tab:has-text("設定")')
+        await page.click('.tab:has-text("旅程設定")'); await page.wait_for_selector('.settings-view')
+        check('旅程設定保留底部分頁', await page.is_visible('#tabbar'))
+        check('旅程設定可回首頁', await page.is_visible('.settings-view .trip-switch'))
+        await page.click('text=前往 App 設定／備份'); await page.wait_for_selector('#import-file')
+        check('App 設定頁不顯示底部分頁', not await page.is_visible('#tabbar'))
         async with page.expect_download() as dl:
             await page.click('button:has-text("匯出完整備份")')
         d = await dl.value
@@ -119,12 +123,12 @@ async def main():
         await page.wait_for_selector('.import-view')
         check('損壞檔顯示無法匯入', '無法匯入' in await page.inner_text('.import-view h1'))
         await page.click('text=返回')
-        await page.click('.tab:has-text("今天")')
+        await page.goto(BASE + '#today'); await page.wait_for_selector('.today-view')
         await page.wait_for_timeout(300); print("DBG", (await page.inner_text("main"))[:400].replace("\n"," | "))
         check("損壞檔後資料仍在", await page.is_visible(".next-card"))
         # 匯入合法備份（整份取代）
         page.on('dialog', lambda dlg: asyncio.ensure_future(dlg.accept()))
-        await page.click('.tab:has-text("設定")')
+        await page.goto(BASE + '#app'); await page.wait_for_selector('#import-file')
         await page.set_input_files('#import-file', path)
         await page.wait_for_selector('.import-view')
         check('預覽顯示摘要', '完成 0、略過 2' in await page.inner_text('.import-view'))
