@@ -46,6 +46,13 @@ Service Worker 只在 `https://` 或 `localhost` 下運作。
 3. 一兩分鐘後即可從 `https://<帳號>.github.io/travel-companion/` 開啟。
 4. 所有路徑都是相對路徑，所以子路徑不必另外設定。manifest 的 `scope`／`start_url` 都是 `./`。
 
+**自訂網域 `trip.tclin.tw`**
+
+- repo 根目錄的 `CNAME` 檔內容為 `trip.tclin.tw`。
+- DNS：在 tclin.tw 的 DNS 管理處新增 `CNAME`，主機名稱 `trip`，指向 `ang7946.github.io`。
+- GitHub → Settings → Pages → Custom domain 填 `trip.tclin.tw`；憑證核發後，勾選 **Enforce HTTPS**。
+- iPhone 的本機資料綁定網域。請直接以 `https://trip.tclin.tw/` 加入主畫面並匯入行程，不要用 github.io 網址，以免日後重新匯入。
+
 **發佈新版本時**：修改 `sw.js` 裡的 `VERSION`（例如改成 `1.0.1`）。使用者開啟 App 後會看到「有新版本可用 → 重新載入」。IndexedDB 中的行程不會被動到。
 
 ## 4. 在 iPhone 上安裝與匯入私人行程
