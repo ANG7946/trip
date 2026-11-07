@@ -1,13 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.8.2';
-import * as DB from './db.js?v=1.8.2';
-import * as V from './csv.js?v=1.8.2';
-import * as X from './xlsx.js?v=1.8.2';
-import * as PH from './photos.js?v=1.8.2';
-import * as IM from './images.js?v=1.8.2';
-import * as WX from './weather.js?v=1.8.2';
+import * as C from './core.js?v=1.8.3';
+import * as DB from './db.js?v=1.8.3';
+import * as V from './csv.js?v=1.8.3';
+import * as X from './xlsx.js?v=1.8.3';
+import * as PH from './photos.js?v=1.8.3';
+import * as IM from './images.js?v=1.8.3';
+import * as WX from './weather.js?v=1.8.3';
 
-export const APP_VERSION = '1.8.2';
+export const APP_VERSION = '1.8.3';
 
 // ---------- 狀態 ----------
 const state = {
@@ -254,7 +254,10 @@ function renderTabBar() {
 }
 
 function versionLine() {
-  return h('p', { class: 'version', text: `旅程導航助手 v${APP_VERSION}・資料格式 v${C.SCHEMA_VERSION}・無帳號、無追蹤、資料不離開手機` });
+  return h('p', { class: 'version' },
+    h('span', { text: `旅程導航助手 v${APP_VERSION}・資料格式 v${C.SCHEMA_VERSION}` }), h('br'),
+    h('span', { text: '無帳號、無追蹤、資料不離開手機' }), h('br'),
+    h('span', { class: 'credit', text: '製作：林祖強（Tzu-Chiang Lin）・2026' }));
 }
 
 // ---------- 共用：回到「我的旅程」 ----------

@@ -1,19 +1,19 @@
 // sw.js — 只快取網站資產（app shell）；行程資料存在 IndexedDB，不經過這裡
-const VERSION = '1.8.2';
+const VERSION = '1.8.3';
 const CACHE = `tc-shell-${VERSION}`;
 const ASSETS = [
   './',
   './index.html',
-  './css/styles.css?v=1.8.2',
-  './js/app.js?v=1.8.2',
-  './js/theme-boot.js?v=1.8.2',
-  './js/core.js?v=1.8.2',
-  './js/db.js?v=1.8.2',
-  './js/csv.js?v=1.8.2',
-  './js/xlsx.js?v=1.8.2',
-  './js/photos.js?v=1.8.2',
-  './js/images.js?v=1.8.2',
-  './js/weather.js?v=1.8.2',
+  './css/styles.css?v=1.8.3',
+  './js/app.js?v=1.8.3',
+  './js/theme-boot.js?v=1.8.3',
+  './js/core.js?v=1.8.3',
+  './js/db.js?v=1.8.3',
+  './js/csv.js?v=1.8.3',
+  './js/xlsx.js?v=1.8.3',
+  './js/photos.js?v=1.8.3',
+  './js/images.js?v=1.8.3',
+  './js/weather.js?v=1.8.3',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',

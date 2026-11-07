@@ -91,7 +91,8 @@ p { margin: 0.5em 0; }
 a { color: var(--primary); }
 .loading { padding: 2rem 1rem; color: var(--muted); }
 .hint, .sub { color: var(--muted); font-size: 0.95rem; }
-.version { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 2rem; }
+.version { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 2rem; line-height: 1.7; }
+.version .credit { font-size: 0.8rem; }
 .visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .skip-link { position: absolute; left: -999px; top: 0; }
 .skip-link:focus { left: 8px; top: calc(8px + var(--safe-top)); z-index: 100; background: var(--surface); padding: 8px; }
