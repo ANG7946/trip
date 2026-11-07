@@ -12,6 +12,7 @@ const edits = {
   'js/xlsx.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/theme-boot.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/images.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
+  'js/weather.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'package.json': [[/"version": "[\d.]+"/, `"version": "${v}"`]],
 };
 for (const [file, list] of Object.entries(edits)) {

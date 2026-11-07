@@ -1,12 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.7.0';
-import * as DB from './db.js?v=1.7.0';
-import * as V from './csv.js?v=1.7.0';
-import * as X from './xlsx.js?v=1.7.0';
-import * as PH from './photos.js?v=1.7.0';
-import * as IM from './images.js?v=1.7.0';
+import * as C from './core.js?v=1.8.0';
+import * as DB from './db.js?v=1.8.0';
+import * as V from './csv.js?v=1.8.0';
+import * as X from './xlsx.js?v=1.8.0';
+import * as PH from './photos.js?v=1.8.0';
+import * as IM from './images.js?v=1.8.0';
+import * as WX from './weather.js?v=1.8.0';
 
-export const APP_VERSION = '1.7.0';
+export const APP_VERSION = '1.8.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -31,6 +32,7 @@ const state = {
   pendingPhotos: null,                                     // 批次指派預覽
   clockPrefs: { show: true, homeTz: null },                // 兩地時間：家鄉時區首次開啟時記下
   themeMode: 'auto',                                       // 日夜模式：auto | light | dark
+  weatherPrefs: { show: true },                            // 天氣預報（Open-Meteo）
 };
 
 const main = () => document.getElementById('main');
@@ -306,7 +308,7 @@ function clockNode(trip) {
   if (!c) return h('span', { class: 'dual-clock', id: 'dual-clock' });
   return h('span', { class: 'dual-clock', id: 'dual-clock', 'aria-live': 'off', dataset: { tz: trip.timeZone } },
     '當地 ', h('strong', { text: c.localTime }), `・${c.homeLabel} `, h('strong', { text: c.homeTime }),
-    `（${c.diffText}${c.dayNote ? '，' : ''}`, c.dayNote ? h('span', { class: 'clock-note', text: c.dayNote }) : null, '）');
+    c.dayNote ? [' ', h('span', { class: 'clock-note', text: `（${c.dayNote}）` })] : null);
 }
 
 let clockTimer = null;
@@ -320,6 +322,92 @@ function startClock() {
   clockTimer = setInterval(refreshClock, 30000);
   // 從地圖 App 返回時立即更新，不等下一次計時
   document.addEventListener('visibilitychange', refreshClock);
+}
+
+// ---------- 天氣 ----------
+const wxMem = new Map();     // 快取鍵 → { fetchedAt, parsed }
+const geoMem = new Map();    // 城市 → { lat, lng }
+const wxInflight = new Set();
+
+function agoText(ms) {
+  const m = Math.round((Date.now() - ms) / 60000);
+  if (m < 60) return `${Math.max(1, m)} 分鐘前`;
+  const hr = Math.round(m / 60);
+  return hr < 48 ? `${hr} 小時前` : `${Math.round(hr / 24)} 天前`;
+}
+
+async function cityCoordsAsync(trip, date, city) {
+  const direct = WX.cityCoords(trip, date, city);
+  if (direct) return direct;
+  const key = PH.normName(city);
+  if (geoMem.has(key)) return geoMem.get(key);
+  const saved = await DB.getMeta(`geo:${key}`, null).catch(() => null);
+  if (saved) { geoMem.set(key, saved); return saved; }
+  if (!navigator.onLine) return null;
+  const res = await fetch(WX.geocodeUrl(city), { credentials: 'omit', referrerPolicy: 'no-referrer' });
+  if (!res.ok) return null;
+  const r = (await res.json()).results?.[0];
+  if (!r) return null;
+  const c = { lat: Math.round(r.latitude * 100) / 100, lng: Math.round(r.longitude * 100) / 100 };
+  geoMem.set(key, c);
+  DB.setMeta(`geo:${key}`, c).catch(() => {});
+  return c;
+}
+
+/** 取得（必要時更新）某城市的預報；回傳 { fetchedAt, parsed } 或 null */
+async function ensureWeather(trip, date, city) {
+  const coords = await cityCoordsAsync(trip, date, city).catch(() => null);
+  if (!coords) return null;
+  const key = WX.cacheKey(coords);
+  let entry = wxMem.get(key) || await DB.getMeta(key, null).catch(() => null);
+  if (entry) wxMem.set(key, entry);
+  const stale = !entry || Date.now() - entry.fetchedAt > WX.WEATHER_TTL_MS;
+  if (stale && navigator.onLine && !wxInflight.has(key)) {
+    wxInflight.add(key);
+    try {
+      const res = await fetch(WX.forecastUrl(coords.lat, coords.lng, trip.timeZone), { credentials: 'omit', referrerPolicy: 'no-referrer' });
+      if (res.ok) {
+        entry = { fetchedAt: Date.now(), parsed: WX.parseForecast(await res.json()) };
+        wxMem.set(key, entry);
+        DB.setMeta(key, entry).catch(() => {});
+      }
+    } catch { /* 沿用舊資料 */ } finally { wxInflight.delete(key); }
+  }
+  return entry || null;
+}
+
+function weatherRow(trip) {
+  const row = h('div', { class: 'weather-row', id: 'weather-row' });
+  if (!state.weatherPrefs.show) return row;
+  const date = state.viewDate;
+  const cities = C.citiesForDate(trip, date);
+  if (!cities.length) return row;
+  const viewing = `${trip.tripId}|${date}`;
+  row.dataset.viewing = viewing;
+  Promise.all(cities.map((c) => ensureWeather(trip, date, c).then((e) => [c, e]).catch(() => [c, null]))).then((list) => {
+    const el = document.getElementById('weather-row');
+    if (!el || el.dataset.viewing !== viewing) return; // 已切換日期
+    const chips = [];
+    let oldest = null;
+    const today = C.dateInTimeZone(trip.timeZone);
+    for (const [city, entry] of list) {
+      if (!entry) continue;
+      const d = WX.describeDay(entry.parsed, date, { today });
+      if (!d) {
+        const lastDay = Object.keys(entry.parsed.daily).sort().pop();
+        if (lastDay && date > lastDay) chips.push(h('span', { class: 'wx-chip muted', text: `${city}：約兩週內才有預報` }));
+        continue;
+      }
+      oldest = oldest == null ? entry.fetchedAt : Math.min(oldest, entry.fetchedAt);
+      chips.push(h('span', { class: 'wx-chip', title: d.text },
+        h('span', { class: 'wx-city', text: city }), ` ${d.icon} `,
+        d.now ? h('strong', { text: `${d.now} ` }) : null, d.temp, d.rain ? h('span', { class: 'wx-rain', text: ` ${d.rain}` }) : null));
+    }
+    if (!chips.length) { el.replaceChildren(); return; }
+    const staleNote = oldest && Date.now() - oldest > WX.WEATHER_TTL_MS ? `（${agoText(oldest)}的資料）` : '';
+    el.replaceChildren(...chips, h('a', { class: 'wx-src', href: 'https://open-meteo.com/', target: '_blank', rel: 'noopener noreferrer' }, `Open-Meteo${staleNote}`));
+  });
+  return row;
 }
 
 // ---------- 共用：頁首與日期切換 ----------
@@ -341,8 +429,8 @@ function dayHeader(trip, { title } = {}) {
       select,
       btn('後一天 ›', () => setViewDate(dates[idx + 1]), 'btn ghost date-step', { disabled: idx < 0 || idx >= dates.length - 1, 'aria-label': '後一天' })),
     h('div', { class: 'clock-row' }, clockNode(trip), themeToggle()),
+    weatherRow(trip),
     h('div', { class: 'date-meta' },
-      h('span', { class: 'date-long', text: C.formatDateLong(state.viewDate) }),
       isToday ? h('span', { class: 'chip today', text: '今天' }) : null,
       state.phase === 'before' && !isToday ? h('span', { class: 'chip preview', text: '行前預覽' }) : null,
       cities.map((c) => h('span', { class: 'chip city', text: c }))));
@@ -1271,7 +1359,7 @@ function appearanceCard() {
     if (C.isValidTimeZone(v)) setClockPrefs({ homeTz: v }); else toast('時區名稱不正確', { kind: 'error' });
   });
   return h('section', { class: 'card' },
-    h('h2', { text: '外觀與時間' }),
+    h('h2', { text: '外觀、時間與天氣' }),
     field('日夜模式', h('select', { on: { change: (e) => setThemeMode(e.target.value) } },
       ['auto', 'light', 'dark'].map((m) => h('option', { value: m, selected: state.themeMode === m }, m === 'auto' ? '跟隨系統（預設）' : THEME_LABELS[m])))),
     h('p', { class: 'hint', text: '「今天」頁頂端的 ☾／☀︎ 按鈕可快速切換；選「跟隨系統」會依 iPhone 的外觀設定自動變化。' }),
@@ -1279,7 +1367,19 @@ function appearanceCard() {
       h('input', { type: 'checkbox', checked: cp.show, on: { change: (e) => setClockPrefs({ show: e.target.checked }) } }),
       h('span', { text: '在「今天」頁顯示兩地時間' })),
     field('家鄉時區', sel, '到國外後 iPhone 會自動改成當地時間，所以家鄉時區另外記在這裡；與旅行地時差為 0 時不顯示。'),
-    custom);
+    custom,
+    h('label', { class: 'check' },
+      h('input', { type: 'checkbox', checked: state.weatherPrefs.show, on: { change: (e) => setWeatherPrefs({ show: e.target.checked }) } }),
+      h('span', { text: '在「今天」頁顯示天氣預報' })),
+    h('p', { class: 'hint' }, '資料來源：', h('a', { href: 'https://open-meteo.com/', target: '_blank', rel: 'noopener noreferrer' }, 'Open-Meteo'),
+      '（CC BY 4.0）。只傳送城市的大略座標（約 1 公里），不含您的位置或行程；每次約數 KB，3 小時內不重抓，離線時顯示上次的資料。預報約涵蓋 16 天。'));
+}
+
+async function setWeatherPrefs(patch) {
+  const next = { ...state.weatherPrefs, ...patch };
+  try { await DB.setMeta('weatherPrefs', next); } catch (e) { toast(`儲存失敗：${e.message || e}`, { kind: 'error' }); return; }
+  state.weatherPrefs = next;
+  render();
 }
 
 async function setClockPrefs(patch) {
@@ -2090,6 +2190,8 @@ async function init() {
     state.onboardingDismissed = await DB.getMeta('onboardingDismissed', false);
     try { state.themeMode = localStorage.getItem('tc-theme') || 'auto'; } catch { state.themeMode = 'auto'; }
     if (!['auto', 'light', 'dark'].includes(state.themeMode)) state.themeMode = 'auto';
+    const savedWx = await DB.getMeta('weatherPrefs', null);
+    if (savedWx) state.weatherPrefs = { ...state.weatherPrefs, ...savedWx };
     const savedClock = await DB.getMeta('clockPrefs', null);
     if (savedClock) state.clockPrefs = { ...state.clockPrefs, ...savedClock };
     if (!state.clockPrefs.homeTz) {

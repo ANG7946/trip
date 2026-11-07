@@ -18,7 +18,7 @@ async def main():
         page = await ctx.new_page()
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
-        page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
+        page.on('console', lambda m: errors.append(m.text) if m.type == 'error' and 'ERR_TUNNEL_CONNECTION_FAILED' not in m.text else None)
         await page.goto(BASE)
         await page.wait_for_selector('.welcome')
         await page.screenshot(path=f'{SHOTS}/01-welcome.png')

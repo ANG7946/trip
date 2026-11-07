@@ -24,12 +24,16 @@ async def main():
         page = await ctx.new_page()
         errs = []
         page.on('pageerror', lambda e: errs.append(str(e)))
-        page.on('console', lambda m: errs.append(m.text) if m.type == 'error' else None)
+        page.on('console', lambda m: errs.append(m.text) if m.type == 'error' and 'ERR_TUNNEL_CONNECTION_FAILED' not in m.text else None)
         await page.goto(BASE); await page.wait_for_selector('.welcome')
         await page.click('text=先看看示範旅程'); await page.wait_for_selector('.next-card')
 
         txt = await page.inner_text('#dual-clock')
-        check('顯示兩地時間（家鄉自動記為臺北，11 月相差 7 小時）', '當地' in txt and '臺北' in txt and '臺北快 7 小時' in txt, txt)
+        import re
+        def hours(t):
+            m = re.findall(r'(\d{2}):(\d{2})', t); return [int(a) * 60 + int(b) for a, b in m]
+        hh = hours(txt)
+        check('顯示兩地時間（家鄉自動記為臺北，11 月相差 7 小時，不再顯示時差文字）', '當地' in txt and '臺北' in txt and '快' not in txt and len(hh) == 2 and (hh[1] - hh[0]) % 1440 == 420, txt)
         light_bg = await bg(page)
         check('跟隨系統：淺色', await page.get_attribute('html', 'data-theme') == 'auto' and light_bg == 'rgb(244, 246, 249)', light_bg)
         await page.screenshot(path=f'{SHOTS}/40-light.png')
@@ -61,7 +65,8 @@ async def main():
         await page.locator('label.field:has-text("家鄉時區") select').select_option('Asia/Tokyo')
         await page.goto(BASE + '#today'); await page.wait_for_selector('.next-card')
         txt = await page.inner_text('#dual-clock')
-        check('改家鄉時區為東京（相差 8 小時）', '東京快 8 小時' in txt, txt)
+        hh = hours(txt)
+        check('改家鄉時區為東京（相差 8 小時）', '東京' in txt and (hh[1] - hh[0]) % 1440 == 480, txt)
 
         # 關閉兩地時間
         await page.goto(BASE + '#app'); await page.wait_for_selector('.settings-view')
@@ -81,7 +86,8 @@ async def main():
         p3 = await ctx3.new_page()
         await p3.goto(BASE + '#today'); await p3.wait_for_selector('.next-card')
         t3 = (await p3.inner_text('#dual-clock')).strip()
-        check('出國後手機改為當地時區，家鄉仍是臺北', '臺北' in t3 and '臺北快 7 小時' in t3, t3)
+        hh = hours(t3)
+        check('出國後手機改為當地時區，家鄉仍是臺北', '臺北' in t3 and (hh[1] - hh[0]) % 1440 == 420, t3)
         await ctx3.close()
 
         check('無 JS／CSP 錯誤', not errs, '; '.join(errs))

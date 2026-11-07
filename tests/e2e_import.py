@@ -41,7 +41,7 @@ async def main():
         page = await ctx.new_page()
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
-        page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
+        page.on('console', lambda m: errors.append(m.text) if m.type == 'error' and 'ERR_TUNNEL_CONNECTION_FAILED' not in m.text else None)
         await page.goto(BASE); await page.wait_for_selector('.welcome')
         # 等 Service Worker 接管頁面（下載問題只在 SW 控制下出現）
         await wait_true(page, 'navigator.serviceWorker && navigator.serviceWorker.controller !== null', timeout=10000)
