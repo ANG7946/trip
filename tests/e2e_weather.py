@@ -69,6 +69,10 @@ async def main():
         n2 = len(hits)
         await page.goto(BASE + '#today'); await page.wait_for_selector('.next-card'); await page.wait_for_timeout(800)
         check('關閉後不顯示天氣、也不發出請求', await page.locator('#weather-row .wx-chip').count() == 0 and len(hits) == n2)
+        plain = await page.locator('#weather-row .chip.city').all_inner_texts()
+        check('關閉天氣後仍以城市標籤顯示當天城市（11/14 兩城市）', plain == ['Vienna', 'Bratislava'], str(plain))
+        check('「行前預覽」移到兩地時間同一行；原城市列已移除', await page.locator('.clock-row .chip.preview').count() == 1 and await page.locator('.date-meta').count() == 0)
+        check('沒有出現 null 字樣', 'null' not in await page.inner_text('.day-header'))
         check('無 JS／CSP 錯誤', not errs, '; '.join(errs))
         await b.close()
     fails = [r for r in results if not r[1]]

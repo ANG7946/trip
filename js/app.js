@@ -1,13 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.8.3';
-import * as DB from './db.js?v=1.8.3';
-import * as V from './csv.js?v=1.8.3';
-import * as X from './xlsx.js?v=1.8.3';
-import * as PH from './photos.js?v=1.8.3';
-import * as IM from './images.js?v=1.8.3';
-import * as WX from './weather.js?v=1.8.3';
+import * as C from './core.js?v=1.8.4';
+import * as DB from './db.js?v=1.8.4';
+import * as V from './csv.js?v=1.8.4';
+import * as X from './xlsx.js?v=1.8.4';
+import * as PH from './photos.js?v=1.8.4';
+import * as IM from './images.js?v=1.8.4';
+import * as WX from './weather.js?v=1.8.4';
 
-export const APP_VERSION = '1.8.3';
+export const APP_VERSION = '1.8.4';
 
 // ---------- 狀態 ----------
 const state = {
@@ -380,12 +380,15 @@ async function ensureWeather(trip, date, city) {
   return entry || null;
 }
 
-function weatherRow(trip) {
-  const row = h('div', { class: 'weather-row', id: 'weather-row' });
-  if (!state.weatherPrefs.show) return row;
+function plainCityChip(city) {
+  return h('span', { class: 'chip city', text: city });
+}
+
+function weatherRow(trip, cities = C.citiesForDate(trip, state.viewDate)) {
+  // 先顯示純城市標籤；取得天氣後再換成天氣標籤（沒有資料的城市維持純標籤）
+  const row = h('div', { class: 'weather-row', id: 'weather-row' }, cities.map(plainCityChip));
+  if (!state.weatherPrefs.show || !cities.length) return row;
   const date = state.viewDate;
-  const cities = C.citiesForDate(trip, date);
-  if (!cities.length) return row;
   const viewing = `${trip.tripId}|${date}`;
   row.dataset.viewing = viewing;
   Promise.all(cities.map((c) => ensureWeather(trip, date, c).then((e) => [c, e]).catch(() => [c, null]))).then((list) => {
@@ -394,22 +397,23 @@ function weatherRow(trip) {
     const chips = [];
     let oldest = null;
     const today = C.dateInTimeZone(trip.timeZone);
+    let anyWeather = false;
     for (const [city, entry] of list) {
-      if (!entry) continue;
-      const d = WX.describeDay(entry.parsed, date, { today });
+      const d = entry ? WX.describeDay(entry.parsed, date, { today }) : null;
       if (!d) {
-        const lastDay = Object.keys(entry.parsed.daily).sort().pop();
-        if (lastDay && date > lastDay) chips.push(h('span', { class: 'wx-chip muted', text: `${city}：約兩週內才有預報` }));
+        const lastDay = entry ? Object.keys(entry.parsed.daily).sort().pop() : null;
+        chips.push(lastDay && date > lastDay ? h('span', { class: 'wx-chip muted', text: `${city}・約兩週內才有預報` }) : plainCityChip(city));
         continue;
       }
+      anyWeather = true;
       oldest = oldest == null ? entry.fetchedAt : Math.min(oldest, entry.fetchedAt);
       chips.push(h('span', { class: 'wx-chip', title: d.text },
         h('span', { class: 'wx-city', text: city }), ` ${d.icon} `,
         d.now ? h('strong', { text: `${d.now} ` }) : null, d.temp, d.rain ? h('span', { class: 'wx-rain', text: ` ${d.rain}` }) : null));
     }
-    if (!chips.length) { el.replaceChildren(); return; }
     const staleNote = oldest && Date.now() - oldest > WX.WEATHER_TTL_MS ? `（${agoText(oldest)}的資料）` : '';
-    el.replaceChildren(...chips, h('a', { class: 'wx-src', href: 'https://open-meteo.com/', target: '_blank', rel: 'noopener noreferrer' }, `Open-Meteo${staleNote}`));
+    if (anyWeather) chips.push(h('a', { class: 'wx-src', href: 'https://open-meteo.com/', target: '_blank', rel: 'noopener noreferrer' }, `Open-Meteo${staleNote}`));
+    el.replaceChildren(...chips);
   });
   return row;
 }
@@ -432,12 +436,15 @@ function dayHeader(trip, { title } = {}) {
       btn('‹ 前一天', () => setViewDate(dates[idx - 1]), 'btn ghost date-step', { disabled: idx <= 0, 'aria-label': '前一天' }),
       select,
       btn('後一天 ›', () => setViewDate(dates[idx + 1]), 'btn ghost date-step', { disabled: idx < 0 || idx >= dates.length - 1, 'aria-label': '後一天' })),
-    h('div', { class: 'clock-row' }, clockNode(trip), themeToggle()),
-    weatherRow(trip),
-    h('div', { class: 'date-meta' },
+    // 兩地時間＋「今天／行前預覽」標記＋日夜切換，同一行
+    h('div', { class: 'clock-row' },
+      clockNode(trip),
       isToday ? h('span', { class: 'chip today', text: '今天' }) : null,
       state.phase === 'before' && !isToday ? h('span', { class: 'chip preview', text: '行前預覽' }) : null,
-      cities.map((c) => h('span', { class: 'chip city', text: c }))));
+      h('span', { class: 'clock-spacer' }),
+      themeToggle()),
+    // 天氣標籤已含城市名稱；沒有天氣資料的城市以純城市標籤顯示
+    weatherRow(trip, cities));
 }
 
 // ---------- 導航按鈕 ----------

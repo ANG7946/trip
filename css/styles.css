@@ -415,3 +415,8 @@ body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
 .wx-city { font-weight: 700; margin-right: 2px; }
 .wx-rain { color: var(--primary); font-weight: 600; }
 .wx-src { font-size: 0.75rem; color: var(--muted); }
+.clock-row { flex-wrap: wrap; }
+.clock-row .dual-clock { flex: 0 1 auto; }
+.clock-spacer { flex: 1 1 0; }
+.clock-row .chip { font-size: 0.8rem; padding: 1px 8px; }
+.weather-row .chip.city { font-size: 0.9rem; padding: 3px 10px; }

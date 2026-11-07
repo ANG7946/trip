@@ -1,5 +1,5 @@
 // db.js — IndexedDB 資料存取層（所有讀寫都經由此處）
-import { migrateTrip } from './core.js?v=1.8.3';
+import { migrateTrip } from './core.js?v=1.8.4';
 
 const DB_NAME = 'travel-companion';
 const DB_VERSION = 2; // IndexedDB 結構版本；資料內容版本見 core.SCHEMA_VERSION
