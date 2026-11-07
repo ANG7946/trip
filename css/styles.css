@@ -25,8 +25,8 @@
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
 }
-@media (prefers-color-scheme: dark) {
-  :root {
+/* 深色：手動選擇深色，或「跟隨系統」且系統為深色 */
+:root[data-theme="dark"] {
     --bg: #0d1117;
     --surface: #161b22;
     --text: #f3f4f6;
@@ -43,8 +43,30 @@
     --warn-bg: #3a1d10;
     --ok: #6ee7a0;
     --danger: #ff8a80;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --text: #f3f4f6;
+    --muted: #b6bfcc;
+    --border: #3b4452;
+    --brand: #0b2545;
+    --primary: #3b82f6;
+    --primary-text: #0b1020;
+    --done: #6ee7a0;
+    --done-bg: #12301f;
+    --skip: #fbbf5a;
+    --skip-bg: #3a2a0b;
+    --warn: #ffb08a;
+    --warn-bg: #3a1d10;
+    --ok: #6ee7a0;
+    --danger: #ff8a80;
+    color-scheme: dark;
   }
 }
+:root[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -98,7 +120,8 @@ a { color: var(--primary); }
 .btn.danger { border-color: var(--danger); color: var(--danger); }
 .btn.done { background: var(--done); border-color: var(--done); color: #fff; flex: 2; }
 .btn.skip { border-color: var(--skip); color: var(--skip); flex: 1; }
-@media (prefers-color-scheme: dark) { .btn.done { color: #0b1020; } }
+:root[data-theme="dark"] .btn.done { color: #0b1020; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.done { color: #0b1020; } }
 .btn.nav {
   width: 100%;
   min-height: 56px;
@@ -374,3 +397,13 @@ body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
 .job-report { margin: 8px 0; }
 .job-log summary { min-height: 40px; display: flex; align-items: center; font-weight: 600; cursor: pointer; }
 .job-log li { font-size: 0.88rem; }
+
+/* ---------- 兩地時間與日夜切換 ---------- */
+.clock-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; min-height: 36px; }
+.dual-clock { flex: 1; min-width: 0; font-size: 0.9rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dual-clock strong { color: var(--text); font-weight: 700; }
+.dual-clock .clock-note { color: var(--skip); font-weight: 600; }
+.theme-toggle {
+  flex: 0 0 auto; min-width: 44px; min-height: 36px; padding: 4px 10px; border-radius: 999px;
+  border: 1.5px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 0.85rem; font-weight: 600;
+}

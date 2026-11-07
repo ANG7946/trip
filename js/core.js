@@ -718,3 +718,57 @@ export function migrateTrip(trip) {
   // 例：if (trip.schemaVersion === 1) { ...升級至 2...; trip.schemaVersion = 2; }
   throw new Error(`不支援的資料版本：${trip.schemaVersion}`);
 }
+
+// ---------- 兩地時間 ----------
+const TZ_LABELS = {
+  'Europe/Vienna': '維也納', 'Europe/Budapest': '布達佩斯', 'Europe/Bratislava': '布拉提斯拉瓦', 'Europe/Prague': '布拉格',
+  'Europe/Berlin': '柏林', 'Europe/Paris': '巴黎', 'Europe/London': '倫敦', 'Europe/Rome': '羅馬', 'Europe/Madrid': '馬德里',
+  'Europe/Amsterdam': '阿姆斯特丹', 'Europe/Zurich': '蘇黎世', 'Europe/Lisbon': '里斯本', 'Europe/Istanbul': '伊斯坦堡',
+  'Asia/Taipei': '臺北', 'Asia/Tokyo': '東京', 'Asia/Seoul': '首爾', 'Asia/Hong_Kong': '香港', 'Asia/Shanghai': '上海',
+  'Asia/Singapore': '新加坡', 'Asia/Bangkok': '曼谷', 'Asia/Kuala_Lumpur': '吉隆坡', 'Asia/Dubai': '杜拜',
+  'America/New_York': '紐約', 'America/Los_Angeles': '洛杉磯', 'America/Chicago': '芝加哥', 'America/Vancouver': '溫哥華',
+  'Australia/Sydney': '雪梨', 'Pacific/Auckland': '奧克蘭',
+};
+
+export const HOME_TIME_ZONES = ['Asia/Taipei', 'Asia/Hong_Kong', 'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore',
+  'Europe/London', 'Europe/Berlin', 'America/New_York', 'America/Los_Angeles', 'Australia/Sydney'];
+
+export function tzLabel(tz) {
+  if (TZ_LABELS[tz]) return TZ_LABELS[tz];
+  const last = String(tz || '').split('/').pop() || '';
+  return last.replace(/_/g, ' ');
+}
+
+/** 某時區在某時間點相對 UTC 的分鐘數（自動含夏令時間） */
+export function tzOffsetMinutes(timeZone, at = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(at);
+  const g = (t) => Number(parts.find((p) => p.type === t).value);
+  const asUtc = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+  return Math.round((asUtc - Math.floor(at.getTime() / 1000) * 1000) / 60000);
+}
+
+/**
+ * 兩地時間資訊。時差為 0 時 same=true（介面可隱藏）。
+ * 回傳 { localTime, homeTime, homeLabel, diffMinutes, diffText, dayNote, same }
+ */
+export function dualClock(localTz, homeTz, at = new Date()) {
+  const diff = tzOffsetMinutes(homeTz, at) - tzOffsetMinutes(localTz, at);
+  const homeLabel = tzLabel(homeTz);
+  const abs = Math.abs(diff);
+  const hm = `${Math.floor(abs / 60)} 小時${abs % 60 ? ` ${abs % 60} 分` : ''}`;
+  const diffText = diff === 0 ? '時間相同' : `${homeLabel}${diff > 0 ? '快' : '慢'} ${hm}`;
+  const dl = dateInTimeZone(localTz, at);
+  const dh = dateInTimeZone(homeTz, at);
+  const dayNote = dh > dl ? `${homeLabel}已是隔天` : dh < dl ? `${homeLabel}還是前一天` : '';
+  return {
+    localTime: timeInTimeZone(localTz, at),
+    homeTime: timeInTimeZone(homeTz, at),
+    homeLabel,
+    diffMinutes: diff,
+    diffText,
+    dayNote,
+    same: diff === 0,
+  };
+}

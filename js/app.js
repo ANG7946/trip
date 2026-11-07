@@ -1,12 +1,12 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.6.2';
-import * as DB from './db.js?v=1.6.2';
-import * as V from './csv.js?v=1.6.2';
-import * as X from './xlsx.js?v=1.6.2';
-import * as PH from './photos.js?v=1.6.2';
-import * as IM from './images.js?v=1.6.2';
+import * as C from './core.js?v=1.7.0';
+import * as DB from './db.js?v=1.7.0';
+import * as V from './csv.js?v=1.7.0';
+import * as X from './xlsx.js?v=1.7.0';
+import * as PH from './photos.js?v=1.7.0';
+import * as IM from './images.js?v=1.7.0';
 
-export const APP_VERSION = '1.6.2';
+export const APP_VERSION = '1.7.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -29,6 +29,8 @@ const state = {
   photoJob: null,                                          // 預先下載進度
   images: new Map(),                                       // 自己的照片：id → { mime, data(base64), … }
   pendingPhotos: null,                                     // 批次指派預覽
+  clockPrefs: { show: true, homeTz: null },                // 兩地時間：家鄉時區首次開啟時記下
+  themeMode: 'auto',                                       // 日夜模式：auto | light | dark
 };
 
 const main = () => document.getElementById('main');
@@ -260,6 +262,66 @@ function tripSwitch(title) {
     h('span', { class: 'trip-switch-title', text: title }));
 }
 
+// ---------- 日夜模式 ----------
+function systemPrefersDark() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+function effectiveDark() {
+  return state.themeMode === 'dark' || (state.themeMode === 'auto' && systemPrefersDark());
+}
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', state.themeMode);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', effectiveDark() ? '#0d1117' : '#0b2545');
+}
+function setThemeMode(mode) {
+  state.themeMode = ['light', 'dark'].includes(mode) ? mode : 'auto';
+  try { localStorage.setItem('tc-theme', state.themeMode); } catch { /* 無法保存時僅本次有效 */ }
+  applyTheme();
+  render();
+}
+const THEME_LABELS = { auto: '跟隨系統', light: '淺色', dark: '深色' };
+
+function themeToggle() {
+  const dark = effectiveDark();
+  return h('button', {
+    type: 'button', class: 'theme-toggle',
+    'aria-label': dark ? '切換為淺色模式' : '切換為深色模式',
+    title: `目前：${THEME_LABELS[state.themeMode]}${state.themeMode === 'auto' ? `（${dark ? '深色' : '淺色'}）` : ''}`,
+    on: { click: () => { setThemeMode(dark ? 'light' : 'dark'); toast(`已切換為${dark ? '淺色' : '深色'}模式（可在 App 設定改回「跟隨系統」）`, { duration: 3000 }); } },
+  }, dark ? '☀︎ 淺色' : '☾ 深色');
+}
+
+// ---------- 兩地時間 ----------
+function clockText(trip) {
+  const home = state.clockPrefs.homeTz;
+  if (!state.clockPrefs.show || !home || !C.isValidTimeZone(home)) return null;
+  const c = C.dualClock(trip.timeZone, home);
+  if (c.same) return null;
+  return c;
+}
+
+function clockNode(trip) {
+  const c = clockText(trip);
+  if (!c) return h('span', { class: 'dual-clock', id: 'dual-clock' });
+  return h('span', { class: 'dual-clock', id: 'dual-clock', 'aria-live': 'off', dataset: { tz: trip.timeZone } },
+    '當地 ', h('strong', { text: c.localTime }), `・${c.homeLabel} `, h('strong', { text: c.homeTime }),
+    `（${c.diffText}${c.dayNote ? '，' : ''}`, c.dayNote ? h('span', { class: 'clock-note', text: c.dayNote }) : null, '）');
+}
+
+let clockTimer = null;
+function refreshClock() {
+  const el = document.getElementById('dual-clock');
+  const trip = activeTrip();
+  if (el && trip && document.visibilityState === 'visible') el.replaceWith(clockNode(trip));
+}
+function startClock() {
+  clearInterval(clockTimer);
+  clockTimer = setInterval(refreshClock, 30000);
+  // 從地圖 App 返回時立即更新，不等下一次計時
+  document.addEventListener('visibilitychange', refreshClock);
+}
+
 // ---------- 共用：頁首與日期切換 ----------
 function dayHeader(trip, { title } = {}) {
   const dates = C.listDates(trip.startDate, trip.endDate);
@@ -278,6 +340,7 @@ function dayHeader(trip, { title } = {}) {
       btn('‹ 前一天', () => setViewDate(dates[idx - 1]), 'btn ghost date-step', { disabled: idx <= 0, 'aria-label': '前一天' }),
       select,
       btn('後一天 ›', () => setViewDate(dates[idx + 1]), 'btn ghost date-step', { disabled: idx < 0 || idx >= dates.length - 1, 'aria-label': '後一天' })),
+    h('div', { class: 'clock-row' }, clockNode(trip), themeToggle()),
     h('div', { class: 'date-meta' },
       h('span', { class: 'date-long', text: C.formatDateLong(state.viewDate) }),
       isToday ? h('span', { class: 'chip today', text: '今天' }) : null,
@@ -1011,6 +1074,7 @@ function viewAppSettings() {
     '請先用「導航測試」確認哪一種在您的 iPhone 上能直接跳到 Apple Maps。') : null,
     h('a', { class: 'btn', href: '#maptest' }, '導航測試（實機驗證用）')));
 
+  sections.push(appearanceCard());
   sections.push(photoSettingsCard());
 
   sections.push(h('section', { class: 'card' },
@@ -1188,6 +1252,41 @@ function updatePhotoProgress() {
   const el = document.getElementById('photo-progress');
   const j = state.photoJob;
   if (el && j) el.textContent = `處理中 ${j.done}/${j.total}・找到 ${j.found}・找不到 ${j.notFound}${j.failed ? `・失敗 ${j.failed}` : ''}`;
+}
+
+function appearanceCard() {
+  const cp = state.clockPrefs;
+  const tzList = C.HOME_TIME_ZONES.includes(cp.homeTz) || !cp.homeTz ? C.HOME_TIME_ZONES : [cp.homeTz, ...C.HOME_TIME_ZONES];
+  const custom = h('input', { type: 'text', placeholder: 'IANA 時區，例：Europe/Lisbon', hidden: true });
+  const sel = h('select', {
+    on: {
+      change: (e) => {
+        if (e.target.value === '__custom') { custom.hidden = false; custom.focus(); return; }
+        setClockPrefs({ homeTz: e.target.value });
+      },
+    },
+  }, tzList.map((z) => h('option', { value: z, selected: z === cp.homeTz }, `${C.tzLabel(z)}（${z}）`)), h('option', { value: '__custom' }, '其他（自行輸入）…'));
+  custom.addEventListener('change', () => {
+    const v = custom.value.trim();
+    if (C.isValidTimeZone(v)) setClockPrefs({ homeTz: v }); else toast('時區名稱不正確', { kind: 'error' });
+  });
+  return h('section', { class: 'card' },
+    h('h2', { text: '外觀與時間' }),
+    field('日夜模式', h('select', { on: { change: (e) => setThemeMode(e.target.value) } },
+      ['auto', 'light', 'dark'].map((m) => h('option', { value: m, selected: state.themeMode === m }, m === 'auto' ? '跟隨系統（預設）' : THEME_LABELS[m])))),
+    h('p', { class: 'hint', text: '「今天」頁頂端的 ☾／☀︎ 按鈕可快速切換；選「跟隨系統」會依 iPhone 的外觀設定自動變化。' }),
+    h('label', { class: 'check' },
+      h('input', { type: 'checkbox', checked: cp.show, on: { change: (e) => setClockPrefs({ show: e.target.checked }) } }),
+      h('span', { text: '在「今天」頁顯示兩地時間' })),
+    field('家鄉時區', sel, '到國外後 iPhone 會自動改成當地時間，所以家鄉時區另外記在這裡；與旅行地時差為 0 時不顯示。'),
+    custom);
+}
+
+async function setClockPrefs(patch) {
+  const next = { ...state.clockPrefs, ...patch };
+  try { await DB.setMeta('clockPrefs', next); } catch (e) { toast(`儲存失敗：${e.message || e}`, { kind: 'error' }); return; }
+  state.clockPrefs = next;
+  render();
 }
 
 function photoSettingsCard() {
@@ -1989,6 +2088,17 @@ async function init() {
     } catch { state.images = new Map(); }
     state.lastExportAt = await DB.getMeta('lastExportAt', null);
     state.onboardingDismissed = await DB.getMeta('onboardingDismissed', false);
+    try { state.themeMode = localStorage.getItem('tc-theme') || 'auto'; } catch { state.themeMode = 'auto'; }
+    if (!['auto', 'light', 'dark'].includes(state.themeMode)) state.themeMode = 'auto';
+    const savedClock = await DB.getMeta('clockPrefs', null);
+    if (savedClock) state.clockPrefs = { ...state.clockPrefs, ...savedClock };
+    if (!state.clockPrefs.homeTz) {
+      // 第一次開啟：記下手機目前的時區作為家鄉時區（之後出國不會跟著變）
+      let tz = 'Asia/Taipei';
+      try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || tz; } catch { /* 使用預設 */ }
+      state.clockPrefs.homeTz = tz;
+      DB.setMeta('clockPrefs', state.clockPrefs).catch(() => {});
+    }
     const savedPhoto = await DB.getMeta('photoPrefs', null);
     if (savedPhoto) state.photoPrefs = { ...state.photoPrefs, ...savedPhoto };
     const savedMap = await DB.getMeta('mapPrefs', null);
@@ -2038,7 +2148,14 @@ async function init() {
     }
   });
 
+  applyTheme();
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => { if (state.themeMode === 'auto') { applyTheme(); render(); } };
+    if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange);
+  }
   render();
+  startClock();
   registerServiceWorker();
   setTimeout(gcImages, 3000);
   DB.requestPersistence().then((p) => { state.persisted = p; });

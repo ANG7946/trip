@@ -1,5 +1,5 @@
 // images.js — 使用者自己的照片：縮圖、編碼、批次指派
-import { normName } from './photos.js?v=1.6.2';
+import { normName } from './photos.js?v=1.7.0';
 
 export const MAX_SIDE = 640;     // 長邊像素
 export const JPEG_QUALITY = 0.78;

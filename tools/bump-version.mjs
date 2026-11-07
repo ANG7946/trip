@@ -10,6 +10,7 @@ const edits = {
   'js/db.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/csv.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/xlsx.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
+  'js/theme-boot.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/images.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'package.json': [[/"version": "[\d.]+"/, `"version": "${v}"`]],
 };
