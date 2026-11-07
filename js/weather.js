@@ -1,6 +1,6 @@
 // weather.js — 天氣預報（Open-Meteo，免費、免金鑰；資料授權 CC BY 4.0）
 // 只傳送城市的大略座標（小數 2 位，約 1 公里），不傳送使用者位置或行程內容。
-import { CITY_CENTERS, normName } from './photos.js?v=1.9.0';
+import { CITY_CENTERS, normName } from './photos.js?v=1.9.1';
 
 export const WEATHER_TTL_MS = 3 * 3600 * 1000; // 3 小時內不重抓
 export const FORECAST_DAYS = 16;

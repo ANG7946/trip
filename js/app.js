@@ -1,13 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.9.0';
-import * as DB from './db.js?v=1.9.0';
-import * as V from './csv.js?v=1.9.0';
-import * as X from './xlsx.js?v=1.9.0';
-import * as PH from './photos.js?v=1.9.0';
-import * as IM from './images.js?v=1.9.0';
-import * as WX from './weather.js?v=1.9.0';
+import * as C from './core.js?v=1.9.1';
+import * as DB from './db.js?v=1.9.1';
+import * as V from './csv.js?v=1.9.1';
+import * as X from './xlsx.js?v=1.9.1';
+import * as PH from './photos.js?v=1.9.1';
+import * as IM from './images.js?v=1.9.1';
+import * as WX from './weather.js?v=1.9.1';
 
-export const APP_VERSION = '1.9.0';
+export const APP_VERSION = '1.9.1';
 
 // ---------- 狀態 ----------
 const state = {
@@ -222,9 +222,8 @@ function renderStatusBar() {
   const bar = document.getElementById('statusbar');
   bar.replaceChildren();
   if (!navigator.onLine) {
-    bar.appendChild(h('div', { class: 'banner offline', role: 'status' },
-      h('strong', { text: '離線中' }),
-      '　行程可照常瀏覽與修改；Apple Maps 能否規劃路線取決於網路與您事先下載的離線地圖。'));
+    bar.appendChild(h('div', { class: 'banner offline', role: 'status', title: 'Apple Maps 能否規劃路線，取決於您事先下載的離線地圖' },
+      h('strong', { text: '離線中' }), '・行程可照常使用'));
   }
   if (state.updateReady) {
     bar.appendChild(h('div', { class: 'banner update', role: 'status' },
