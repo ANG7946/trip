@@ -303,6 +303,21 @@ export function nextStop(trip, date) {
   return stopsForDate(trip, date).find((s) => s.status === 'pending') || null;
 }
 
+/**
+ * 「回飯店」目標：當天的住宿（優先尚未完成的那一筆，例如退房前仍是原飯店）；
+ * 當天沒有住宿時，往前找最近一晚的住宿。略過已跳過或無法導航的住宿。找不到回傳 null。
+ */
+export function lodgingFor(trip, date) {
+  if (!trip || !date) return null;
+  const usable = (s) => s.type === 'hotel' && s.status !== 'skipped' && resolveDestination(s).level;
+  const today = stopsForDate(trip, date).filter(usable);
+  if (today.length) return today.find((s) => s.status === 'pending') || today[today.length - 1];
+  const earlier = [...new Set(trip.stops.filter((s) => s.date && s.date < date && usable(s)).map((s) => s.date))].sort();
+  if (!earlier.length) return null;
+  const prev = stopsForDate(trip, earlier[earlier.length - 1]).filter(usable);
+  return prev[prev.length - 1] || null;
+}
+
 /** 當日涉及的城市（依出現順序，不重複）。 */
 export function citiesForDate(trip, date) {
   const out = [];
@@ -560,7 +575,8 @@ export function parseImport(text, byteLength = text ? text.length : 0) {
   });
   // 回傳深拷貝並補齊選填設定的預設值
   const clean = trips.map((t) => fillDefaults(JSON.parse(JSON.stringify(t))));
-  return { ok: true, kind, trips: clean, images, errors: [], summary, exportedAt: data.exportedAt || null };
+  const extras = kind === 'backup' ? cleanBackupExtras(data) : { expenses: null, contacts: null, skipped: 0 };
+  return { ok: true, kind, trips: clean, images, extras, errors: [], summary, exportedAt: data.exportedAt || null };
 }
 
 /**
@@ -641,8 +657,11 @@ export function fillDefaults(trip) {
 
 // ---------- 匯出 ----------
 
-/** images 為 null 表示「不含照片」的備份（還原時保留手機中既有照片）。 */
-export function buildBackup(trips, at = nowIso(), images = null) {
+/**
+ * images 為 null 表示「不含照片」的備份（還原時保留手機中既有照片）。
+ * extra：{ expenses, contacts }（花費紀錄與個人緊急聯絡人，只放在完整備份，不進分享範本）。
+ */
+export function buildBackup(trips, at = nowIso(), images = null, extra = {}) {
   const b = {
     format: BACKUP_FORMAT,
     schemaVersion: SCHEMA_VERSION,
@@ -650,16 +669,44 @@ export function buildBackup(trips, at = nowIso(), images = null) {
     app: 'Travel Companion',
     trips,
   };
+  if (Array.isArray(extra.expenses)) b.expenses = extra.expenses;
+  if (extra.contacts && typeof extra.contacts === 'object') b.contacts = extra.contacts;
   if (images) {
-    const used = new Set(trips.flatMap((t) => t.stops.map((s) => s.userPhoto && s.userPhoto.id).filter(Boolean)));
+    const used = referencedImageIds(trips, extra.expenses);
     b.images = images.filter((im) => used.has(im.id));
   }
   return b;
 }
 
-/** 所有旅程中仍被引用的照片 id */
-export function referencedImageIds(trips) {
-  return new Set(trips.flatMap((t) => t.stops.map((s) => s.userPhoto && s.userPhoto.id).filter(Boolean)));
+/** 所有旅程（及花費收據）中仍被引用的照片 id */
+export function referencedImageIds(trips, expenses = []) {
+  const ids = new Set(trips.flatMap((t) => t.stops.map((s) => s.userPhoto && s.userPhoto.id).filter(Boolean)));
+  for (const x of expenses || []) if (x && x.receiptId) ids.add(x.receiptId);
+  return ids;
+}
+
+/** 備份中的花費與聯絡人：格式不符的項目略過（不讓整份備份失敗），回傳 { expenses, contacts, skipped } */
+export function cleanBackupExtras(data) {
+  const out = { expenses: null, contacts: null, skipped: 0 };
+  if (Array.isArray(data.expenses)) {
+    out.expenses = data.expenses.filter((x) => {
+      const ok = typeOf(x) === 'object' && typeof x.id === 'string' && typeof x.tripId === 'string'
+        && Number.isFinite(x.amount) && x.amount >= 0 && typeof x.currency === 'string' && /^[A-Z]{3}$/.test(x.currency)
+        && (x.date == null || isValidDateString(x.date));
+      if (!ok) out.skipped += 1;
+      return ok;
+    }).map((x) => JSON.parse(JSON.stringify(x)));
+  }
+  if (typeOf(data.contacts) === 'object') {
+    const c = data.contacts;
+    const str = (v, n = 100) => (typeof v === 'string' ? v.slice(0, n) : '');
+    out.contacts = {
+      people: (Array.isArray(c.people) ? c.people : []).filter((p) => typeOf(p) === 'object')
+        .map((p) => ({ id: str(p.id, 60) || uuid(), name: str(p.name), relation: str(p.relation, 40), phone: str(p.phone, 40) })),
+      insurance: typeOf(c.insurance) === 'object' ? { name: str(c.insurance.name), phone: str(c.insurance.phone, 40), note: str(c.insurance.note, 200) } : null,
+    };
+  }
+  return out;
 }
 
 /** 分享用範本：移除完成狀態、時間戳與備註，產生新的 tripId 與停靠點 id。 */

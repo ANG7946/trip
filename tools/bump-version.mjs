@@ -13,6 +13,7 @@ const edits = {
   'js/theme-boot.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/images.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'js/weather.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
+  'js/tools.js': [[/\?v=[\d.]+/g, `?v=${v}`]],
   'package.json': [[/"version": "[\d.]+"/, `"version": "${v}"`]],
 };
 for (const [file, list] of Object.entries(edits)) {

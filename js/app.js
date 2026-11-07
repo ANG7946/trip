@@ -1,13 +1,14 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.9.1';
-import * as DB from './db.js?v=1.9.1';
-import * as V from './csv.js?v=1.9.1';
-import * as X from './xlsx.js?v=1.9.1';
-import * as PH from './photos.js?v=1.9.1';
-import * as IM from './images.js?v=1.9.1';
-import * as WX from './weather.js?v=1.9.1';
+import * as C from './core.js?v=2.0.0';
+import * as DB from './db.js?v=2.0.0';
+import * as V from './csv.js?v=2.0.0';
+import * as X from './xlsx.js?v=2.0.0';
+import * as PH from './photos.js?v=2.0.0';
+import * as IM from './images.js?v=2.0.0';
+import * as WX from './weather.js?v=2.0.0';
+import * as T from './tools.js?v=2.0.0';
 
-export const APP_VERSION = '1.9.1';
+export const APP_VERSION = '2.0.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -34,6 +35,14 @@ const state = {
   themeMode: 'auto',                                       // 日夜模式：auto | light | dark
   weatherPrefs: { show: true },                            // 天氣預報（Open-Meteo）
   wxOpen: null,                                            // 目前展開逐時預報的城市
+  expenses: [],                                            // 花費紀錄（所有旅程；本機）
+  contacts: { people: [], insurance: null },               // 個人緊急聯絡人（本機；含於備份、不進分享範本）
+  toolsPrefs: { extraCountries: {} },                      // 手動加入的國家（tripId → 國碼）
+  fx: null,                                                // 匯率快取 { table, fetchedAt }
+  fxBusy: false,
+  fxInput: null,                                           // 匯率換算目前輸入 { cur, amount }
+  expenseDraft: null,                                      // 新增花費時的預填（日期、停靠點）
+  geoCC: {},                                               // 城市 → 國碼（地理編碼快取）
 };
 
 const main = () => document.getElementById('main');
@@ -210,6 +219,8 @@ function render() {
       case 'photos': view = viewPhotos(trip); break;
       case 'photoassign': view = viewPhotoAssign(trip); break;
       case 'paste': view = viewPaste(); break;
+      case 'tools': view = viewTools(trip); break;
+      case 'expense': view = viewExpenseForm(trip, state.route.arg); break;
       default: view = viewToday(trip);
     }
   }
@@ -238,6 +249,7 @@ function renderTabBar() {
     ['today', '今天', '#today'],
     ['dates', '全部日期', '#dates'],
     ['edit', '編輯行程', '#edit'],
+    ['tools', '工具', '#tools'],
     ['settings', '旅程設定', '#settings'],
   ];
   const nav = document.getElementById('tabbar');
@@ -249,7 +261,8 @@ function renderTabBar() {
   if (hide) { nav.replaceChildren(); return; }
   nav.replaceChildren(...tabs.map(([name, label, href]) => {
     const active = r === name || (name === 'edit' && (r === 'stop' || r === 'new'))
-      || (name === 'settings' && (r === 'tripform' || r === 'photos'));
+      || (name === 'settings' && (r === 'tripform' || r === 'photos'))
+      || (name === 'tools' && r === 'expense');
     return h('a', { href, class: `tab${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null }, label);
   }));
 }
@@ -346,14 +359,15 @@ async function cityCoordsAsync(trip, date, city) {
   const key = PH.normName(city);
   if (geoMem.has(key)) return geoMem.get(key);
   const saved = await DB.getMeta(`geo:${key}`, null).catch(() => null);
-  if (saved) { geoMem.set(key, saved); return saved; }
+  if (saved) { geoMem.set(key, saved); if (saved.cc) state.geoCC[key] = saved.cc; return saved; }
   if (!navigator.onLine) return null;
   // cache: 'no-store'：App 自有快取；避免沿用瀏覽器中缺少 CORS 標頭的舊快取
   const res = await fetch(WX.geocodeUrl(city), { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
   if (!res.ok) return null;
   const r = (await res.json()).results?.[0];
   if (!r) return null;
-  const c = { lat: Math.round(r.latitude * 100) / 100, lng: Math.round(r.longitude * 100) / 100 };
+  const c = { lat: Math.round(r.latitude * 100) / 100, lng: Math.round(r.longitude * 100) / 100, cc: r.country_code || null };
+  if (c.cc) state.geoCC[key] = c.cc;
   geoMem.set(key, c);
   DB.setMeta(`geo:${key}`, c).catch(() => {});
   return c;
@@ -474,7 +488,7 @@ function dayHeader(trip, { title } = {}) {
     `${C.formatDateShort(d)}${d === state.todayInTrip ? '・今天' : ''}`)));
 
   return h('header', { class: 'day-header' },
-    tripSwitch(title || trip.title),
+    h('div', { class: 'head-row' }, tripSwitch(title || trip.title), hotelButton(trip)),
     h('div', { class: 'date-row' },
       btn('‹ 前一天', () => setViewDate(dates[idx - 1]), 'btn ghost date-step', { disabled: idx <= 0, 'aria-label': '前一天' }),
       select,
@@ -489,6 +503,17 @@ function dayHeader(trip, { title } = {}) {
     // 天氣標籤已含城市名稱；沒有天氣資料的城市以純城市標籤顯示
     weatherRow(trip, cities),
     h('div', { class: 'wx-detail', id: 'weather-detail', hidden: true }));
+}
+
+// 「回飯店」：當天住宿，否則前一晚的住宿；沒有住宿時不顯示
+function hotelButton(trip) {
+  const stop = C.lodgingFor(trip, state.viewDate);
+  if (!stop) return null;
+  const mode = state.modeOverride[stop.id] || stop.defaultMode;
+  const url = C.buildDirectionsUrl(stop, mode, mapOpts(trip));
+  if (!url) return null;
+  return h('a', { class: 'hotel-btn', href: url, rel: 'noopener',
+    'aria-label': `回飯店：以 ${providerName(trip)} ${C.MODE_LABELS[mode]}導航至 ${stop.title}`, title: stop.title }, '⌂ 回飯店');
 }
 
 // ---------- 導航按鈕 ----------
@@ -787,7 +812,7 @@ async function setNoPhoto(stopId, none) {
 
 /** 刪除不再被任何停靠點引用的照片（啟動時與刪除旅程後執行） */
 async function gcImages() {
-  const used = C.referencedImageIds(state.trips);
+  const used = C.referencedImageIds(state.trips, state.expenses);
   const orphans = [...state.images.keys()].filter((id) => !used.has(id));
   if (!orphans.length) return;
   try {
@@ -828,7 +853,9 @@ function nextCard(trip, stop) {
     h('details', { class: 'more' },
       h('summary', null, '備援與編輯'),
       fallbackActions(trip, stop),
-      h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(stop.id)}` }, '編輯此停靠點')));
+      h('div', { class: 'btn-row' },
+        h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(stop.id)}` }, '編輯此停靠點'),
+        expenseButton(stop))));
 }
 
 function listCard(trip, stop, n) {
@@ -859,7 +886,9 @@ function listCard(trip, stop, n) {
       C.resolveDestination(stop).level ? modeSwitcher(stop) : null,
       statusButtons(stop),
       fallbackActions(trip, stop),
-      h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(stop.id)}` }, '編輯')));
+      h('div', { class: 'btn-row' },
+        h('a', { class: 'btn ghost small', href: `#stop/${encodeURIComponent(stop.id)}` }, '編輯'),
+        expenseButton(stop))));
   } else if (stop.status === 'pending') {
     card.appendChild(h('div', { class: 'card-quick' }, navButton(trip, stop)));
   }
@@ -1181,7 +1210,7 @@ function viewSettings(trip) {
         h('a', { class: 'btn ghost', href: '#app' }, '前往 App 設定／備份'))),
     h('section', { class: 'card danger-zone' },
       h('h2', { text: '刪除旅程' }),
-      h('p', { class: 'hint', text: '會刪除此旅程的所有停靠點與紀錄。建議先匯出備份。' }),
+      h('p', { class: 'hint', text: '會刪除此旅程的所有停靠點、紀錄與花費。建議先匯出備份。' }),
       btn(`刪除「${trip.title}」`, () => removeTrip(trip), 'btn danger')));
 }
 
@@ -1686,7 +1715,8 @@ function fallbackDownload(blob, filename, onDone) {
 function exportBackup({ withPhotos = true } = {}) {
   const trip = activeTrip();
   // 照片已在記憶體中，可同步組出備份（iOS 分享面板必須在點擊當下呼叫）
-  const backup = C.buildBackup(state.trips, undefined, withPhotos ? [...state.images.values()] : null);
+  const backup = C.buildBackup(state.trips, undefined, withPhotos ? [...state.images.values()] : null,
+    { expenses: state.expenses, contacts: state.contacts });
   const slug = state.trips.length === 1 ? C.slugForFile(state.trips[0].title) : 'trip';
   const name = C.backupFileName(slug === 'trip' ? 'travel-companion-backup' : `${slug}-backup`, new Date(), trip ? trip.timeZone : undefined);
   downloadOrShare(backup, name, async (ok) => {
@@ -1767,6 +1797,10 @@ function viewImport() {
         await DB.replaceAllTrips(pi.trips, pi.images);
         state.trips = pi.trips;
         if (pi.images) state.images = new Map(pi.images.map((im) => [im.id, im]));
+        // 備份含花費／聯絡人時才覆蓋（舊版備份沒有這些欄位，保留手機中既有資料）
+        const ex = pi.extras || {};
+        if (ex.expenses) { state.expenses = ex.expenses; await DB.setMeta('expenses', ex.expenses); }
+        if (ex.contacts) { state.contacts = ex.contacts; await DB.setMeta('contacts', ex.contacts); }
       } else {
         if (willReplaceSame && !window.confirm(`這會取代手機中同一個旅程「${single.title}」的資料。確定繼續？`)) return;
         await DB.putTrip(single);
@@ -2112,6 +2146,10 @@ async function removeTrip(trip) {
     return;
   }
   state.trips = state.trips.filter((t) => t.tripId !== trip.tripId);
+  if (state.expenses.some((x) => x.tripId === trip.tripId)) {
+    state.expenses = state.expenses.filter((x) => x.tripId !== trip.tripId);
+    await DB.setMeta('expenses', state.expenses).catch(() => {});
+  }
   gcImages();
   await switchTrip(state.trips[0] ? state.trips[0].tripId : null);
   toast(`已刪除旅程：${trip.title}`);
@@ -2235,6 +2273,442 @@ async function registerServiceWorker() {
   }
 }
 
+// ======================================================================
+// 工具分頁：緊急資訊、個人緊急聯絡人、匯率換算、花費紀錄
+// ======================================================================
+function homeTz() { return state.clockPrefs.homeTz || 'Asia/Taipei'; }
+function homeCurrency() { return T.homeCurrencyFor(homeTz()); }
+function tripCountries(trip) {
+  return T.detectCountries(trip, {
+    geoCC: state.geoCC,
+    extra: (state.toolsPrefs.extraCountries || {})[trip.tripId] || [],
+    homeCC: T.homeCountryFor(homeTz()),
+  });
+}
+function fxCurrencies(trip) {
+  const list = T.tripCurrencies(tripCountries(trip));
+  const home = homeCurrency();
+  if (!list.length) list.push('EUR');
+  return [...list.filter((c) => c !== home), home];
+}
+function fxTable() { return state.fx && state.fx.table && state.fx.table.base === homeCurrency() ? state.fx.table : null; }
+
+async function refreshFx({ force = false } = {}) {
+  const base = homeCurrency();
+  if (state.fxBusy || !navigator.onLine) return;
+  if (!force && !T.ratesStale(state.fx && state.fx.table, base, Date.now(), state.fx && state.fx.fetchedAt)) return;
+  state.fxBusy = true;
+  if (state.route.name === 'tools') renderFxBox();
+  try {
+    const res = await fetch(T.ratesUrl(base), { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status === 429 ? '請求太頻繁，請 20 分鐘後再試' : `HTTP ${res.status}`);
+    const table = T.parseRates(await res.json());
+    if (!table) throw new Error('回應格式不正確');
+    state.fx = { table, fetchedAt: Date.now() };
+    await DB.setMeta('fx', state.fx).catch(() => {});
+    if (force) toast('匯率已更新', { duration: 2500 });
+  } catch (e) {
+    if (force) toast(`匯率更新失敗：${e.message || e}`, { kind: 'error' });
+  } finally {
+    state.fxBusy = false;
+    if (state.route.name === 'tools') renderFxBox();
+  }
+}
+
+function telButton(number, label, cls = 'btn tel') {
+  const href = T.telHref(number);
+  if (!href) return null;
+  return h('a', { class: cls, href, 'aria-label': `撥打 ${label} ${number}` },
+    h('span', { class: 'tel-label', text: label }), h('span', { class: 'tel-num', text: number }));
+}
+
+function viewTools(trip) {
+  if (!trip) return viewWelcome();
+  setTimeout(() => refreshFx(), 0);
+  return h('div', { class: 'view tools-view' },
+    h('header', { class: 'page-header' }, tripSwitch(trip.title), h('h1', { text: '工具' })),
+    h('nav', { class: 'tools-jump', 'aria-label': '工具目錄' },
+      [['#tl-emergency', '緊急'], ['#tl-contacts', '聯絡人'], ['#tl-fx', '匯率'], ['#tl-expense', '花費']].map(([id, label]) =>
+        h('button', { type: 'button', class: 'chip', on: { click: () => document.querySelector(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }) } }, label))),
+    emergencySection(trip),
+    contactsSection(),
+    h('section', { class: 'card', id: 'tl-fx' }, h('div', { id: 'fx-box' }, fxBoxContent(trip))),
+    expenseSection(trip));
+}
+
+// ---------- 緊急資訊 ----------
+function emergencySection(trip) {
+  const countries = tripCountries(trip);
+  const extra = (state.toolsPrefs.extraCountries || {})[trip.tripId] || [];
+  const addable = Object.keys(T.COUNTRIES).filter((cc) => !countries.includes(cc) && cc !== T.homeCountryFor(homeTz()));
+  const sel = h('select', { 'aria-label': '加入其他國家' },
+    h('option', { value: '' }, '＋ 加入其他國家…'),
+    addable.map((cc) => h('option', { value: cc }, T.countryName(cc))));
+  sel.addEventListener('change', async () => {
+    if (!sel.value) return;
+    const map = { ...(state.toolsPrefs.extraCountries || {}) };
+    map[trip.tripId] = [...(map[trip.tripId] || []), sel.value];
+    state.toolsPrefs = { ...state.toolsPrefs, extraCountries: map };
+    await DB.setMeta('toolsPrefs', state.toolsPrefs).catch(() => {});
+    render();
+  });
+  const removeExtra = async (cc) => {
+    const map = { ...(state.toolsPrefs.extraCountries || {}) };
+    map[trip.tripId] = (map[trip.tripId] || []).filter((x) => x !== cc);
+    state.toolsPrefs = { ...state.toolsPrefs, extraCountries: map };
+    await DB.setMeta('toolsPrefs', state.toolsPrefs).catch(() => {});
+    render();
+  };
+
+  // 各國當地緊急電話相同（例如歐盟皆為 112）時只顯示一次
+  const localKey = (cc) => JSON.stringify(T.COUNTRIES[cc]?.local || null);
+  const sharedLocal = countries.length > 1 && T.COUNTRIES[countries[0]] && countries.every((cc) => localKey(cc) === localKey(countries[0]));
+  return h('section', { class: 'card emergency', id: 'tl-emergency' },
+    h('h2', { text: '緊急資訊' }),
+    countries.length ? null : h('p', { class: 'hint', text: '無法從行程判斷前往的國家（停靠點未填城市）。請在下方加入國家。' }),
+    sharedLocal ? h('div', { class: 'em-country' },
+      h('h3', { text: countries.map(T.countryName).join('・') }),
+      h('div', { class: 'tel-grid' }, T.COUNTRIES[countries[0]].local.map((x) => telButton(x.number, x.label, 'btn tel local')))) : null,
+    countries.map((cc) => {
+      const info = T.COUNTRIES[cc];
+      const m = T.MISSIONS[cc];
+      const tf = T.tollFreeDial(cc);
+      const office = m ? { title: m.name, address: m.address, city: '' } : null;
+      const officeUrl = office ? C.buildPlaceUrl(office, { provider: state.mapPrefs.provider }) : null;
+      return h('div', { class: 'em-country' },
+        h('h3', null, T.countryName(cc), extra.includes(cc) ? btn('移除', () => removeExtra(cc), 'btn ghost small em-remove', { 'aria-label': `移除${T.countryName(cc)}` }) : null),
+        sharedLocal ? null : info ? h('div', { class: 'tel-grid' }, info.local.map((x) => telButton(x.number, x.label, 'btn tel local'))) :
+          h('p', { class: 'hint', text: '尚未內建此國家的當地緊急電話；歐盟國家可撥 112。' }),
+        m ? h('div', { class: 'em-mission' },
+          h('p', { class: 'em-name', text: m.name }),
+          telButton(m.emergency.intl, '代表處急難救助（24 小時）', 'btn tel urgent'),
+          m.emergency.local ? h('p', { class: 'hint', text: `當地手機直撥：${m.emergency.local}` }) : null,
+          m.office ? telButton(m.office.intl, '代表處辦公室（上班時間）', 'btn tel ghost') : null,
+          h('p', { class: 'em-addr', text: m.address }),
+          h('div', { class: 'btn-row' },
+            officeUrl ? h('a', { class: 'btn ghost small', href: officeUrl, rel: 'noopener' }, `在 ${providerName(trip)} 查看`) : null,
+            h('a', { class: 'btn ghost small', href: m.url, target: '_blank', rel: 'noopener noreferrer' }, '代表處網站'))) :
+          h('p', { class: 'hint' }, '尚未內建此國家的駐外館處資料，請至',
+            h('a', { href: T.BOCA_MISSIONS_URL, target: '_blank', rel: 'noopener noreferrer' }, '外交部領事事務局'), '查詢。'),
+        tf ? h('p', { class: 'hint', text: `外交部全球免付費專線（當地市話或當地門號）：${tf}` }) : null);
+    }),
+    h('div', { class: 'em-country' },
+      h('h3', { text: T.MOFA_HOTLINE.name }),
+      telButton(T.MOFA_HOTLINE.overseas, '自海外撥打（付費）', 'btn tel'),
+      h('p', { class: 'hint', text: `臺灣親友可代撥國內免付費 ${T.MOFA_HOTLINE.domestic}。無法聯絡代表處時使用。` })),
+    addable.length ? h('label', { class: 'field' }, h('span', { class: 'field-label', text: '其他國家' }), sel) : null,
+    h('p', { class: 'em-source' },
+      '急難救助電話限車禍、搶劫、危及生命等緊急情況，一般護照簽證事項請於上班時間洽詢。資料來源：',
+      h('a', { href: T.BOCA_URL, target: '_blank', rel: 'noopener noreferrer' }, '外交部領事事務局'),
+      `（查證日期 ${T.EMERGENCY_VERIFIED}）。出發前請再確認。`));
+}
+
+// ---------- 個人緊急聯絡人 ----------
+async function saveContacts(next, msg) {
+  try {
+    await DB.setMeta('contacts', next);
+  } catch (e) {
+    toast(`儲存失敗：${e.message || e}`, { kind: 'error' });
+    return false;
+  }
+  const before = state.contacts;
+  state.contacts = next;
+  render();
+  if (msg) toast(msg, { actionLabel: '復原', action: () => saveContacts(before, '已復原') });
+  return true;
+}
+
+function contactsSection() {
+  const c = state.contacts;
+  const people = c.people || [];
+  const ins = c.insurance;
+  const form = (p, onSave, onCancel) => {
+    const name = h('input', { type: 'text', value: p.name || '', autocomplete: 'off', placeholder: '例：王小明' });
+    const relation = h('input', { type: 'text', value: p.relation || '', autocomplete: 'off', placeholder: '例：配偶、同事' });
+    const phone = h('input', { type: 'tel', value: p.phone || '', autocomplete: 'off', placeholder: '含國碼，例：+886-912-345-678' });
+    return h('form', { class: 'mini-form', on: { submit: (e) => { e.preventDefault(); if (!name.value.trim() || !phone.value.trim()) { toast('請填姓名與電話', { kind: 'error' }); return; } onSave({ name: name.value.trim(), relation: relation.value.trim(), phone: phone.value.trim() }); } } },
+      field('姓名', name), field('關係', relation), field('電話', phone, '從國外撥回臺灣請用 +886，並去掉手機號碼開頭的 0。'),
+      h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'btn primary' }, '儲存'), onCancel ? btn('取消', onCancel, 'btn ghost') : null));
+  };
+  const insForm = () => {
+    const name = h('input', { type: 'text', value: ins?.name || '', autocomplete: 'off', placeholder: '例：○○產險海外急難救助' });
+    const phone = h('input', { type: 'tel', value: ins?.phone || '', autocomplete: 'off', placeholder: '例：+886-2-xxxx-xxxx' });
+    const note = h('input', { type: 'text', value: ins?.note || '', autocomplete: 'off', placeholder: '例：撥打時報身分證字號即可' });
+    return h('form', { class: 'mini-form', on: { submit: (e) => { e.preventDefault(); saveContacts({ ...c, insurance: name.value.trim() || phone.value.trim() ? { name: name.value.trim(), phone: phone.value.trim(), note: note.value.trim() } : null }, '已儲存保險資訊'); } } },
+      field('保險公司／服務名稱', name), field('急難救助專線', phone), field('備註', note, '請勿填寫保單號碼、身分證字號等個資。'),
+      h('div', { class: 'form-actions' }, h('button', { type: 'submit', class: 'btn primary' }, '儲存')));
+  };
+
+  return h('section', { class: 'card', id: 'tl-contacts' },
+    h('h2', { text: '個人緊急聯絡人' }),
+    h('p', { class: 'hint', text: '只存在這支手機；會包含在完整備份中，不會放進分享範本。' }),
+    people.length ? h('ul', { class: 'contact-list' }, people.map((p) => {
+      const editBox = h('details', { class: 'contact-edit' }, h('summary', null, '編輯'),
+        form(p, (v) => saveContacts({ ...c, people: people.map((x) => (x.id === p.id ? { ...x, ...v } : x)) }, '已更新聯絡人')),
+        btn('刪除此聯絡人', () => saveContacts({ ...c, people: people.filter((x) => x.id !== p.id) }, `已刪除 ${p.name}`), 'btn danger small'));
+      return h('li', { class: 'contact' },
+        telButton(p.phone, `${p.name}${p.relation ? `（${p.relation}）` : ''}`, 'btn tel'),
+        editBox);
+    })) : null,
+    h('details', { class: 'contact-add' },
+      h('summary', null, '＋ 新增聯絡人'),
+      form({}, (v) => saveContacts({ ...c, people: [...people, { id: C.uuid(), ...v }] }, `已新增 ${v.name}`))),
+    h('h3', { text: '旅遊保險' }),
+    ins && ins.phone ? telButton(ins.phone, ins.name || '保險急難救助', 'btn tel') : null,
+    ins && ins.note ? h('p', { class: 'hint', text: ins.note }) : null,
+    h('details', { class: 'contact-add' }, h('summary', null, ins ? '編輯保險資訊' : '＋ 填寫保險急難救助專線'), insForm()));
+}
+
+// ---------- 匯率換算 ----------
+function renderFxBox() {
+  const box = document.getElementById('fx-box');
+  const trip = activeTrip();
+  if (box && trip) box.replaceChildren(...[fxBoxContent(trip)].flat().filter(Boolean));
+}
+
+function fxBoxContent(trip) {
+  const table = fxTable();
+  const curs = fxCurrencies(trip);
+  const home = homeCurrency();
+  if (!state.fxInput || !curs.includes(state.fxInput.cur)) state.fxInput = { cur: curs[0], amount: curs[0] === 'HUF' ? 10000 : 10 };
+  const inputs = {};
+  const update = (fromCur) => {
+    const raw = inputs[fromCur].value.replace(/,/g, '').trim();
+    const amount = raw === '' ? null : Number(raw);
+    state.fxInput = { cur: fromCur, amount };
+    for (const c of curs) {
+      if (c === fromCur) continue;
+      const v = amount == null || !Number.isFinite(amount) ? null : T.convert(amount, fromCur, c, table);
+      inputs[c].value = v == null ? '' : (Math.round(v * 10 ** T.decimalsFor(c)) / 10 ** T.decimalsFor(c)).toString();
+    }
+  };
+  const rows = curs.map((c) => {
+    inputs[c] = h('input', { type: 'text', inputmode: 'decimal', autocomplete: 'off', class: 'fx-input', 'aria-label': `${T.CURRENCY_NAMES[c] || c} 金額`, disabled: !table });
+    inputs[c].addEventListener('input', () => update(c));
+    inputs[c].addEventListener('focus', () => inputs[c].select());
+    return h('label', { class: 'fx-row' },
+      h('span', { class: 'fx-cur' }, h('strong', { text: c }), h('span', { class: 'fx-name', text: T.CURRENCY_NAMES[c] || '' })),
+      inputs[c]);
+  });
+  if (table && state.fxInput.amount != null) {
+    inputs[state.fxInput.cur].value = String(state.fxInput.amount);
+    update(state.fxInput.cur);
+  }
+  const rateLines = table ? curs.filter((c) => c !== home).map((c) => {
+    const r = T.unitRate(c, home, table);
+    return r == null ? `${c}：無資料` : `1 ${c} ≈ ${r < 1 ? r.toFixed(4) : r.toFixed(r < 10 ? 3 : 2)} ${home}`;
+  }) : [];
+  const updated = table && table.updatedAt ? new Intl.DateTimeFormat('zh-TW', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(table.updatedAt)) : null;
+  return [
+    h('h2', { text: '匯率換算' }),
+    table ? null : h('p', { class: 'hint', text: state.fxBusy ? '正在下載匯率…' : (navigator.onLine ? '尚未下載匯率。' : '離線中，且尚未下載過匯率；連網後會自動下載。') }),
+    h('div', { class: 'fx-rows' }, rows),
+    rateLines.length ? h('p', { class: 'fx-rates', text: rateLines.join('　') }) : null,
+    h('p', { class: 'hint fx-note' },
+      updated ? `參考匯率（${updated} 更新，每日一次），實際以銀行或店家為準。` : '參考匯率，實際以銀行或店家為準。',
+      ' ', h('a', { href: T.FX_ATTRIBUTION_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Rates By Exchange Rate API')),
+    btn(state.fxBusy ? '更新中…' : '更新匯率', () => refreshFx({ force: true }), 'btn ghost small', { disabled: state.fxBusy || !navigator.onLine }),
+  ];
+}
+
+// ---------- 花費紀錄 ----------
+function tripExpenses(trip) { return state.expenses.filter((x) => x.tripId === trip.tripId); }
+
+function expenseButton(stop) {
+  return btn('記一筆花費', () => {
+    state.expenseDraft = { date: stop.date, stopId: stop.id };
+    go('#expense/new');
+  }, 'btn ghost small');
+}
+
+function defaultCurrencyFor(trip, date, stopId) {
+  const stop = stopId ? trip.stops.find((s) => s.id === stopId) : null;
+  const city = stop?.city || C.citiesForDate(trip, date)[0];
+  const cc = city ? T.countryForCity(city, state.geoCC) : null;
+  return (cc && T.COUNTRIES[cc]?.currency) || fxCurrencies(trip)[0];
+}
+
+async function saveExpenses(next, msg, undo) {
+  try {
+    await DB.setMeta('expenses', next);
+  } catch (e) {
+    toast(`儲存失敗：${e.message || e}`, { kind: 'error' });
+    return false;
+  }
+  state.expenses = next;
+  if (msg) toast(msg, undo ? { actionLabel: '復原', action: undo } : { duration: 2500 });
+  return true;
+}
+
+function expenseSection(trip) {
+  const list = tripExpenses(trip);
+  const home = homeCurrency();
+  const table = fxTable();
+  const sum = T.totals(list, home, table);
+  const groups = T.groupByDate(list);
+  return h('section', { class: 'card', id: 'tl-expense' },
+    h('h2', { text: '花費紀錄' }),
+    h('div', { class: 'btn-row' },
+      btn('＋ 記一筆', () => { state.expenseDraft = { date: state.viewDate, stopId: null }; go('#expense/new'); }, 'btn primary'),
+      list.length ? btn('匯出 Excel', () => exportExpenses(trip), 'btn ghost') : null),
+    list.length ? h('div', { class: 'exp-total' },
+      h('p', { class: 'big-line', text: table ? `合計約 ${T.formatMoney(sum.homeTotal, home)}` : '合計（尚無匯率，無法換算）' }),
+      h('p', { class: 'hint', text: Object.entries(sum.byCurrency).map(([c, v]) => T.formatMoney(v, c)).join('＋') + (sum.missing && table ? `（${sum.missing} 筆無法換算）` : '') })) :
+      h('p', { class: 'hint', text: '尚無花費紀錄。也可以在停靠點卡片的「備援與編輯」裡直接記一筆。' }),
+    groups.map((g) => {
+      const day = T.totals(g.items, home, table);
+      return h('div', { class: 'exp-day' },
+        h('h3', { class: 'exp-date' }, h('span', { text: g.date ? C.formatDateShort(g.date) : '未指定日期' }),
+          h('span', { class: 'exp-day-sum', text: table ? `約 ${T.formatMoney(day.homeTotal, home)}` : '' })),
+        h('ul', { class: 'exp-list' }, g.items.map((x) => {
+          const v = T.convert(x.amount, x.currency, home, table);
+          const rec = x.receiptId ? state.images.get(x.receiptId) : null;
+          return h('li', null, h('a', { class: 'exp-item', href: `#expense/${encodeURIComponent(x.id)}` },
+            rec ? h('img', { class: 'exp-thumb', src: IM.dataUrl(rec), alt: '收據' }) : h('span', { class: 'exp-cat', text: T.CATEGORY_LABELS[x.category] }),
+            h('span', { class: 'exp-main' },
+              h('span', { class: 'exp-note', text: x.note || x.stopTitle || T.CATEGORY_LABELS[x.category] }),
+              h('span', { class: 'exp-meta', text: [T.CATEGORY_LABELS[x.category], x.note && x.stopTitle ? x.stopTitle : '', T.PAY_LABELS[x.pay]].filter(Boolean).join('・') })),
+            h('span', { class: 'exp-amt' },
+              h('strong', { text: T.formatMoney(x.amount, x.currency) }),
+              v != null && x.currency !== home ? h('span', { class: 'exp-home', text: `≈ ${T.formatMoney(v, home)}` }) : null)));
+        })));
+    }));
+}
+
+function viewExpenseForm(trip, arg) {
+  if (!trip) return viewWelcome();
+  const existing = arg && arg !== 'new' ? state.expenses.find((x) => x.id === arg) : null;
+  if (arg && arg !== 'new' && !existing) {
+    return h('div', { class: 'view' }, h('p', { text: '找不到這筆花費（可能已刪除）。' }), h('a', { class: 'btn', href: '#tools' }, '回到工具'));
+  }
+  const draft = state.expenseDraft || {};
+  const dates = C.listDates(trip.startDate, trip.endDate);
+  const initDate = existing ? existing.date : (dates.includes(draft.date) ? draft.date : (dates.includes(state.viewDate) ? state.viewDate : dates[0]));
+  const initStop = existing ? existing.stopId : draft.stopId || null;
+  const curList = [...new Set([...fxCurrencies(trip), existing?.currency, 'EUR', 'USD'].filter(Boolean))];
+  let receiptId = existing ? existing.receiptId : null;
+  let newReceipt = null; // 尚未儲存的收據照片
+
+  const amount = h('input', { type: 'text', inputmode: 'decimal', autocomplete: 'off', value: existing ? String(existing.amount) : '', placeholder: '0', class: 'amount-input', required: true });
+  const currency = h('select', null, curList.map((c) => h('option', { value: c, selected: c === (existing ? existing.currency : defaultCurrencyFor(trip, initDate, initStop)) }, `${c} ${T.CURRENCY_NAMES[c] || ''}`)));
+  const date = h('select', null, dates.map((d) => h('option', { value: d, selected: d === initDate }, C.formatDateShort(d))));
+  const stopSel = h('select');
+  const fillStops = (keep) => {
+    const stops = C.stopsForDate(trip, date.value);
+    stopSel.replaceChildren(h('option', { value: '' }, '（不指定）'),
+      ...stops.map((s) => h('option', { value: s.id, selected: s.id === keep }, s.title)));
+  };
+  fillStops(initStop);
+  date.addEventListener('change', () => fillStops(null));
+  const note = h('input', { type: 'text', value: existing?.note || '', autocomplete: 'off', placeholder: '例：午餐、地鐵 24 小時票' });
+  let category = existing ? existing.category : (initStop ? ({ meal: 'food', hotel: 'lodging', station: 'transport', transfer: 'transport', attraction: 'ticket' }[trip.stops.find((s) => s.id === initStop)?.type] || 'other') : 'food');
+  let pay = existing ? existing.pay : 'cash';
+  const seg = (values, labels, get, set) => {
+    const wrap = h('div', { class: 'seg-group', role: 'group' });
+    const draw = () => wrap.replaceChildren(...values.map((v) => h('button', {
+      type: 'button', class: `seg${get() === v ? ' on' : ''}`, 'aria-pressed': get() === v ? 'true' : 'false',
+      on: { click: () => { set(v); draw(); } },
+    }, labels[v])));
+    draw();
+    return wrap;
+  };
+  const receiptBox = h('div', { class: 'receipt-box' });
+  const drawReceipt = () => {
+    const rec = newReceipt || (receiptId ? state.images.get(receiptId) : null);
+    receiptBox.replaceChildren(
+      rec ? h('img', { class: 'receipt-img', src: IM.dataUrl(rec), alt: '收據照片' }) : null,
+      h('div', { class: 'btn-row' },
+        btn(rec ? '更換收據照片' : '加上收據照片', () => pickImages({}, async ([file]) => {
+          try {
+            const r = await IM.resizeToJpeg(file);
+            newReceipt = { id: C.uuid(), ...r, createdAt: C.nowIso() };
+            drawReceipt();
+          } catch (e) { toast(`照片處理失敗：${e.message || e}`, { kind: 'error' }); }
+        }), 'btn ghost small'),
+        rec ? btn('移除照片', () => { newReceipt = null; receiptId = null; drawReceipt(); }, 'btn ghost small') : null));
+  };
+  drawReceipt();
+
+  const back = () => { state.expenseDraft = null; go('#tools'); setTimeout(() => document.getElementById('tl-expense')?.scrollIntoView({ block: 'start' }), 50); };
+  async function onSubmit(e) {
+    e.preventDefault();
+    const n = Number(amount.value.replace(/,/g, '').trim());
+    if (!Number.isFinite(n) || n <= 0) { toast('請輸入正確的金額', { kind: 'error' }); amount.focus(); return; }
+    if (newReceipt) {
+      try { await DB.putImages([newReceipt]); } catch (err) { toast(`收據照片儲存失敗：${err.message || err}`, { kind: 'error' }); return; }
+      state.images.set(newReceipt.id, newReceipt);
+      receiptId = newReceipt.id;
+    }
+    const stop = stopSel.value ? trip.stops.find((s) => s.id === stopSel.value) : null;
+    const rec = T.createExpense({
+      ...(existing || {}), id: existing?.id, tripId: trip.tripId, date: date.value, amount: n, currency: currency.value,
+      category, pay, note: note.value.trim(), stopId: stop ? stop.id : null, stopTitle: stop ? stop.title : '', receiptId,
+      createdAt: existing?.createdAt,
+    });
+    const before = state.expenses;
+    const next = existing ? before.map((x) => (x.id === rec.id ? rec : x)) : [...before, rec];
+    const ok = await saveExpenses(next, existing ? '已更新花費' : `已記錄 ${T.formatMoney(n, currency.value)}`,
+      existing ? null : () => saveExpenses(before, '已復原').then(render));
+    if (ok) { gcImages(); back(); }
+  }
+  async function onDelete() {
+    const before = state.expenses;
+    const ok = await saveExpenses(before.filter((x) => x.id !== existing.id), '已刪除這筆花費', () => saveExpenses(before, '已復原').then(render));
+    if (ok) back();
+  }
+
+  return h('div', { class: 'view expense-form' },
+    h('header', { class: 'page-header' }, tripSwitch(trip.title), h('h1', { text: existing ? '編輯花費' : '記一筆花費' })),
+    h('form', { class: 'stop-form', on: { submit: onSubmit } },
+      h('div', { class: 'amount-row' }, field('金額', amount), field('幣別', currency)),
+      h('div', { class: 'field' }, h('span', { class: 'field-label', text: '類別' }), seg(T.EXPENSE_CATEGORIES, T.CATEGORY_LABELS, () => category, (v) => { category = v; })),
+      h('div', { class: 'field' }, h('span', { class: 'field-label', text: '付款方式' }), seg(T.PAY_METHODS, T.PAY_LABELS, () => pay, (v) => { pay = v; })),
+      field('項目／備註', note),
+      field('日期', date),
+      field('停靠點', stopSel),
+      h('div', { class: 'field' }, h('span', { class: 'field-label', text: '收據照片' }), receiptBox),
+      h('div', { class: 'form-actions' },
+        h('button', { type: 'submit', class: 'btn primary' }, '儲存'),
+        btn('取消', back, 'btn ghost')),
+      existing ? btn('刪除這筆花費', onDelete, 'btn danger small') : null));
+}
+
+function exportExpenses(trip) {
+  const home = homeCurrency();
+  const table = fxTable();
+  const list = tripExpenses(trip);
+  const rows = T.expenseRows(list, home, table);
+  const groups = T.groupByDate(list).reverse();
+  const summary = [['日期', `約合 ${home}`], ...groups.map((g) => [g.date, Math.round(T.totals(g.items, home, table).homeTotal * 100) / 100])];
+  const sum = T.totals(list, home, table);
+  summary.push(['合計', Math.round(sum.homeTotal * 100) / 100]);
+  summary.push([]);
+  summary.push(['幣別', '原幣合計']);
+  for (const [c, v] of Object.entries(sum.byCurrency)) summary.push([c, Math.round(v * 100) / 100]);
+  summary.push([]);
+  summary.push(['匯率', table && table.updatedAt ? `參考匯率 ${new Date(table.updatedAt).toISOString().slice(0, 10)}（Rates By Exchange Rate API）` : '尚無匯率']);
+  summary.push(['收據照片', '保存在 App 內（含於完整備份），未放入此檔']);
+  const bytes = X.writeXlsx([{ name: '花費明細', rows }, { name: '每日合計', rows: summary }]);
+  const mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const name = `${C.slugForFile(trip.title)}-expenses-${C.dateInTimeZone(trip.timeZone)}.xlsx`;
+  shareBlob(new Blob([bytes], { type: mime }), name, mime, () => toast(`已匯出：${name}`, { duration: 4000 }));
+}
+
+function shareBlob(blob, filename, mime, onDone) {
+  let file = null;
+  try { file = new File([blob], filename, { type: mime }); } catch { /* 舊環境 */ }
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator.share({ files: [file], title: filename })
+      .then(() => onDone(true))
+      .catch((e) => {
+        if (e && e.name === 'AbortError') toast('已取消匯出', { duration: 2500 });
+        else fallbackDownload(blob, filename, onDone);
+      });
+    return;
+  }
+  fallbackDownload(blob, filename, onDone);
+}
+
 async function init() {
   try {
     state.trips = await DB.getAllTrips();
@@ -2256,6 +2730,10 @@ async function init() {
       state.clockPrefs.homeTz = tz;
       DB.setMeta('clockPrefs', state.clockPrefs).catch(() => {});
     }
+    state.expenses = (await DB.getMeta('expenses', [])) || [];
+    state.contacts = { people: [], insurance: null, ...((await DB.getMeta('contacts', null)) || {}) };
+    state.toolsPrefs = { extraCountries: {}, ...((await DB.getMeta('toolsPrefs', null)) || {}) };
+    state.fx = await DB.getMeta('fx', null);
     const savedPhoto = await DB.getMeta('photoPrefs', null);
     if (savedPhoto) state.photoPrefs = { ...state.photoPrefs, ...savedPhoto };
     const savedMap = await DB.getMeta('mapPrefs', null);
