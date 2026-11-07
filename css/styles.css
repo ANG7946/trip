@@ -402,7 +402,7 @@ body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
 .clock-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; min-height: 36px; }
 .dual-clock { flex: 1; min-width: 0; font-size: 0.9rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .dual-clock strong { color: var(--text); font-weight: 700; }
-.dual-clock .clock-note { color: var(--skip); font-weight: 600; }
+.dual-clock .clock-note { color: var(--skip); font-weight: 700; font-size: 0.8em; margin-left: 2px; vertical-align: super; }
 .theme-toggle {
   flex: 0 0 auto; min-width: 44px; min-height: 36px; padding: 4px 10px; border-radius: 999px;
   border: 1.5px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 0.85rem; font-weight: 600;

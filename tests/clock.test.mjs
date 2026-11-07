@@ -17,8 +17,10 @@ test('跨日提示：維也納晚上 20:00 時臺北已是隔天', () => {
   assert.equal(c.localTime, '20:00');
   assert.equal(c.homeTime, '03:00');
   assert.equal(c.dayNote, '臺北已是隔天');
+  assert.equal(c.dayShift, 1);
   const back = C.dualClock('Asia/Taipei', 'America/Los_Angeles', new Date('2026-11-12T02:00:00Z'));
   assert.equal(back.dayNote, '洛杉磯還是前一天');
+  assert.equal(back.dayShift, -1);
   assert.match(back.diffText, /洛杉磯慢 16 小時/);
 });
 

@@ -762,6 +762,7 @@ export function dualClock(localTz, homeTz, at = new Date()) {
   const dl = dateInTimeZone(localTz, at);
   const dh = dateInTimeZone(homeTz, at);
   const dayNote = dh > dl ? `${homeLabel}已是隔天` : dh < dl ? `${homeLabel}還是前一天` : '';
+  const dayShift = dh > dl ? 1 : dh < dl ? -1 : 0; // 介面以「(+1)」「(-1)」標在家鄉時間後
   return {
     localTime: timeInTimeZone(localTz, at),
     homeTime: timeInTimeZone(homeTz, at),
@@ -769,6 +770,7 @@ export function dualClock(localTz, homeTz, at = new Date()) {
     diffMinutes: diff,
     diffText,
     dayNote,
+    dayShift,
     same: diff === 0,
   };
 }

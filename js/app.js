@@ -1,13 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.8.1';
-import * as DB from './db.js?v=1.8.1';
-import * as V from './csv.js?v=1.8.1';
-import * as X from './xlsx.js?v=1.8.1';
-import * as PH from './photos.js?v=1.8.1';
-import * as IM from './images.js?v=1.8.1';
-import * as WX from './weather.js?v=1.8.1';
+import * as C from './core.js?v=1.8.2';
+import * as DB from './db.js?v=1.8.2';
+import * as V from './csv.js?v=1.8.2';
+import * as X from './xlsx.js?v=1.8.2';
+import * as PH from './photos.js?v=1.8.2';
+import * as IM from './images.js?v=1.8.2';
+import * as WX from './weather.js?v=1.8.2';
 
-export const APP_VERSION = '1.8.1';
+export const APP_VERSION = '1.8.2';
 
 // ---------- 狀態 ----------
 const state = {
@@ -308,7 +308,7 @@ function clockNode(trip) {
   if (!c) return h('span', { class: 'dual-clock', id: 'dual-clock' });
   return h('span', { class: 'dual-clock', id: 'dual-clock', 'aria-live': 'off', dataset: { tz: trip.timeZone } },
     '當地 ', h('strong', { text: c.localTime }), `・${c.homeLabel} `, h('strong', { text: c.homeTime }),
-    c.dayNote ? [' ', h('span', { class: 'clock-note', text: `（${c.dayNote}）` })] : null);
+    c.dayShift ? h('span', { class: 'clock-note', title: c.dayNote, text: `(${c.dayShift > 0 ? '+1' : '-1'})` }) : null);
 }
 
 let clockTimer = null;

@@ -90,6 +90,17 @@ async def main():
         check('出國後手機改為當地時區，家鄉仍是臺北', '臺北' in t3 and (hh[1] - hh[0]) % 1440 == 420, t3)
         await ctx3.close()
 
+        # 跨日：維也納 20:00 = 臺北隔天 03:00 → 顯示 (+1)
+        ctx4 = await b.new_context(viewport={'width': 390, 'height': 844}, timezone_id='Asia/Taipei')
+        p4 = await ctx4.new_page()
+        await p4.clock.set_fixed_time('2026-11-12T19:00:00Z')
+        await p4.goto(BASE); await p4.wait_for_selector('.welcome')
+        await p4.click('text=先看看示範旅程'); await p4.wait_for_selector('.next-card')
+        t4 = (await p4.inner_text('#dual-clock')).replace('\n', '')
+        check('跨日時在家鄉時間後標示 (+1)', '當地 20:00' in t4 and '臺北 03:00(+1)' in t4 and '隔天' not in t4, t4)
+        await p4.screenshot(path=f'{SHOTS}/42-plus1.png', clip={'x': 0, 'y': 0, 'width': 390, 'height': 200})
+        await ctx4.close()
+
         check('無 JS／CSP 錯誤', not errs, '; '.join(errs))
         await b.close()
     fails = [r for r in results if not r[1]]
