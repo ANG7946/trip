@@ -1,13 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.8.0';
-import * as DB from './db.js?v=1.8.0';
-import * as V from './csv.js?v=1.8.0';
-import * as X from './xlsx.js?v=1.8.0';
-import * as PH from './photos.js?v=1.8.0';
-import * as IM from './images.js?v=1.8.0';
-import * as WX from './weather.js?v=1.8.0';
+import * as C from './core.js?v=1.8.1';
+import * as DB from './db.js?v=1.8.1';
+import * as V from './csv.js?v=1.8.1';
+import * as X from './xlsx.js?v=1.8.1';
+import * as PH from './photos.js?v=1.8.1';
+import * as IM from './images.js?v=1.8.1';
+import * as WX from './weather.js?v=1.8.1';
 
-export const APP_VERSION = '1.8.0';
+export const APP_VERSION = '1.8.1';
 
 // ---------- 狀態 ----------
 const state = {
@@ -344,7 +344,8 @@ async function cityCoordsAsync(trip, date, city) {
   const saved = await DB.getMeta(`geo:${key}`, null).catch(() => null);
   if (saved) { geoMem.set(key, saved); return saved; }
   if (!navigator.onLine) return null;
-  const res = await fetch(WX.geocodeUrl(city), { credentials: 'omit', referrerPolicy: 'no-referrer' });
+  // cache: 'no-store'：App 自有快取；避免沿用瀏覽器中缺少 CORS 標頭的舊快取
+  const res = await fetch(WX.geocodeUrl(city), { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
   if (!res.ok) return null;
   const r = (await res.json()).results?.[0];
   if (!r) return null;
@@ -365,7 +366,7 @@ async function ensureWeather(trip, date, city) {
   if (stale && navigator.onLine && !wxInflight.has(key)) {
     wxInflight.add(key);
     try {
-      const res = await fetch(WX.forecastUrl(coords.lat, coords.lng, trip.timeZone), { credentials: 'omit', referrerPolicy: 'no-referrer' });
+      const res = await fetch(WX.forecastUrl(coords.lat, coords.lng, trip.timeZone), { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
       if (res.ok) {
         entry = { fetchedAt: Date.now(), parsed: WX.parseForecast(await res.json()) };
         wxMem.set(key, entry);
