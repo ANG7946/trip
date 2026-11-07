@@ -1,6 +1,6 @@
 {
   "name": "travel-companion",
-  "version": "1.8.4",
+  "version": "1.9.0",
   "private": true,
   "type": "module",
   "description": "iPhone PWA 旅程執行介面：一按開啟 Apple Maps、手動標記完成",

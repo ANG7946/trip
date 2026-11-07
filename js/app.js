@@ -1,13 +1,13 @@
 // app.js — 介面與互動
-import * as C from './core.js?v=1.8.4';
-import * as DB from './db.js?v=1.8.4';
-import * as V from './csv.js?v=1.8.4';
-import * as X from './xlsx.js?v=1.8.4';
-import * as PH from './photos.js?v=1.8.4';
-import * as IM from './images.js?v=1.8.4';
-import * as WX from './weather.js?v=1.8.4';
+import * as C from './core.js?v=1.9.0';
+import * as DB from './db.js?v=1.9.0';
+import * as V from './csv.js?v=1.9.0';
+import * as X from './xlsx.js?v=1.9.0';
+import * as PH from './photos.js?v=1.9.0';
+import * as IM from './images.js?v=1.9.0';
+import * as WX from './weather.js?v=1.9.0';
 
-export const APP_VERSION = '1.8.4';
+export const APP_VERSION = '1.9.0';
 
 // ---------- 狀態 ----------
 const state = {
@@ -33,6 +33,7 @@ const state = {
   clockPrefs: { show: true, homeTz: null },                // 兩地時間：家鄉時區首次開啟時記下
   themeMode: 'auto',                                       // 日夜模式：auto | light | dark
   weatherPrefs: { show: true },                            // 天氣預報（Open-Meteo）
+  wxOpen: null,                                            // 目前展開逐時預報的城市
 };
 
 const main = () => document.getElementById('main');
@@ -151,6 +152,7 @@ async function setStatus(stopId, status) {
 
 async function setViewDate(date) {
   state.viewDate = date;
+  state.wxOpen = null;
   saveSession();
   render();
 }
@@ -365,13 +367,13 @@ async function ensureWeather(trip, date, city) {
   const key = WX.cacheKey(coords);
   let entry = wxMem.get(key) || await DB.getMeta(key, null).catch(() => null);
   if (entry) wxMem.set(key, entry);
-  const stale = !entry || Date.now() - entry.fetchedAt > WX.WEATHER_TTL_MS;
+  const stale = !entry || entry.v !== WX.WX_FORMAT || Date.now() - entry.fetchedAt > WX.WEATHER_TTL_MS;
   if (stale && navigator.onLine && !wxInflight.has(key)) {
     wxInflight.add(key);
     try {
       const res = await fetch(WX.forecastUrl(coords.lat, coords.lng, trip.timeZone), { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
       if (res.ok) {
-        entry = { fetchedAt: Date.now(), parsed: WX.parseForecast(await res.json()) };
+        entry = { v: WX.WX_FORMAT, fetchedAt: Date.now(), parsed: WX.parseForecast(await res.json()) };
         wxMem.set(key, entry);
         DB.setMeta(key, entry).catch(() => {});
       }
@@ -407,15 +409,57 @@ function weatherRow(trip, cities = C.citiesForDate(trip, state.viewDate)) {
       }
       anyWeather = true;
       oldest = oldest == null ? entry.fetchedAt : Math.min(oldest, entry.fetchedAt);
-      chips.push(h('span', { class: 'wx-chip', title: d.text },
-        h('span', { class: 'wx-city', text: city }), ` ${d.icon} `,
-        d.now ? h('strong', { text: `${d.now} ` }) : null, d.temp, d.rain ? h('span', { class: 'wx-rain', text: ` ${d.rain}` }) : null));
+      const open = state.wxOpen === city;
+      chips.push(h('button', {
+        type: 'button', class: `wx-chip${open ? ' open' : ''}`, 'aria-expanded': open ? 'true' : 'false',
+        'aria-label': `${city} ${d.text} ${d.temp}，點選查看逐時預報`,
+        on: { click: () => { state.wxOpen = state.wxOpen === city ? null : city; refreshWeather(); } },
+      },
+      h('span', { class: 'wx-city', text: city }), ` ${d.icon} `,
+      d.now ? h('strong', { text: `${d.now} ` }) : null, d.temp, d.rain ? h('span', { class: 'wx-rain', text: ` ${d.rain}` }) : null,
+      h('span', { class: 'wx-caret', 'aria-hidden': 'true', text: open ? ' ▴' : ' ▾' })));
     }
-    const staleNote = oldest && Date.now() - oldest > WX.WEATHER_TTL_MS ? `（${agoText(oldest)}的資料）` : '';
-    if (anyWeather) chips.push(h('a', { class: 'wx-src', href: 'https://open-meteo.com/', target: '_blank', rel: 'noopener noreferrer' }, `Open-Meteo${staleNote}`));
+    const staleNote = oldest && Date.now() - oldest > WX.WEATHER_TTL_MS ? agoText(oldest) : '';
+    if (staleNote) chips.push(h('span', { class: 'wx-stale', text: `（${staleNote}的資料）` }));
     el.replaceChildren(...chips);
+    // 詳細面板
+    const detailEl = document.getElementById('weather-detail');
+    const openEntry = list.find(([c, e]) => c === state.wxOpen && e);
+    if (detailEl) detailEl.replaceWith(weatherDetail(trip, date, openEntry, today));
   });
   return row;
+}
+
+function refreshWeather() {
+  const trip = activeTrip();
+  const el = document.getElementById('weather-row');
+  if (trip && el) el.replaceWith(weatherRow(trip));
+}
+
+function weatherDetail(trip, date, openEntry, today) {
+  const box = h('div', { class: 'wx-detail', id: 'weather-detail' });
+  if (!openEntry) { box.hidden = true; return box; }
+  const [city, entry] = openEntry;
+  const nowTime = date === today ? C.timeInTimeZone(trip.timeZone) : null;
+  const d = WX.dayDetail(entry.parsed, date, { nowTime });
+  if (!d) { box.hidden = true; return box; }
+  box.append(
+    h('div', { class: 'wx-detail-head' },
+      h('strong', { text: `${city}・${C.formatDateShort(date)}` }),
+      d.sunrise || d.sunset ? h('span', { class: 'wx-sun', text: `日出 ${d.sunrise || '—'}・日落 ${d.sunset || '—'}` }) : null,
+      btn('收合', () => { state.wxOpen = null; refreshWeather(); }, 'btn ghost small wx-close', { 'aria-label': '收合逐時預報' })),
+    d.slots.length
+      ? h('ol', { class: 'wx-slots' }, d.slots.map((x) => h('li', { class: 'wx-slot' },
+        h('span', { class: 'wx-time', text: x.time }),
+        h('span', { class: 'wx-icon', title: x.text, text: x.icon }),
+        h('span', { class: 'wx-temp', text: x.temp }),
+        h('span', { class: 'wx-pop', text: x.pop != null && x.pop >= 10 ? `☂︎${x.pop}%` : '' }))))
+      : h('p', { class: 'hint', text: '這一天沒有逐時預報（可能是舊的離線資料，連網後會自動更新）。' }),
+    h('p', { class: 'wx-attrib' },
+      '天氣資料：', h('a', { href: 'https://open-meteo.com/', target: '_blank', rel: 'noopener noreferrer' }, 'Open-Meteo.com'),
+      '（', h('a', { href: 'https://creativecommons.org/licenses/by/4.0/', target: '_blank', rel: 'noopener noreferrer' }, 'CC BY 4.0'), '）',
+      `・${agoText(entry.fetchedAt)}更新`));
+  return box;
 }
 
 // ---------- 共用：頁首與日期切換 ----------
@@ -444,7 +488,8 @@ function dayHeader(trip, { title } = {}) {
       h('span', { class: 'clock-spacer' }),
       themeToggle()),
     // 天氣標籤已含城市名稱；沒有天氣資料的城市以純城市標籤顯示
-    weatherRow(trip, cities));
+    weatherRow(trip, cities),
+    h('div', { class: 'wx-detail', id: 'weather-detail', hidden: true }));
 }
 
 // ---------- 導航按鈕 ----------

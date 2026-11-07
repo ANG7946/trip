@@ -420,3 +420,20 @@ body.no-tabbar .toast { bottom: calc(var(--safe-bottom) + 12px); }
 .clock-spacer { flex: 1 1 0; }
 .clock-row .chip { font-size: 0.8rem; padding: 1px 8px; }
 .weather-row .chip.city { font-size: 0.9rem; padding: 3px 10px; }
+button.wx-chip { font: inherit; font-size: 0.9rem; color: var(--text); cursor: pointer; min-height: 36px; }
+button.wx-chip.open { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.wx-caret { color: var(--muted); font-size: 0.75rem; }
+.wx-stale { font-size: 0.75rem; color: var(--muted); }
+.wx-detail { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.wx-detail[hidden] { display: none; }
+.wx-detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.wx-detail-head .wx-close { margin-left: auto; min-height: 36px; padding: 4px 10px; }
+.wx-sun { font-size: 0.85rem; color: var(--muted); }
+.wx-slots { list-style: none; padding: 0; margin: 10px 0 6px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; text-align: center; }
+.wx-slot { display: flex; flex-direction: column; align-items: center; gap: 2px; font-variant-numeric: tabular-nums; }
+.wx-time { font-size: 0.78rem; color: var(--muted); }
+.wx-icon { font-size: 1.25rem; line-height: 1.2; }
+.wx-temp { font-weight: 700; font-size: 0.95rem; }
+.wx-pop { font-size: 0.72rem; color: var(--primary); font-weight: 600; min-height: 1em; }
+.wx-attrib { margin: 4px 0 0; font-size: 0.72rem; color: var(--muted); }
+.wx-attrib a { color: var(--muted); }
